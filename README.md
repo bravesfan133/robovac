@@ -15,6 +15,11 @@ Three pieces:
 Plus `docs/`, which is the rooting runbook: `PREFLIGHT.md`, `WIRING.md`,
 `ROOTING.md`, `POST-ROOT.md`.
 
+**This repo is public, so it contains no hardware identifiers.** Your unit's
+serial, MAC and LAN address belong in `local/unit.md`, which is gitignored. The
+docs use RFC 5737 documentation addresses (`192.0.2.x`) throughout; substitute
+your own in a local copy or in `.env`.
+
 ## Why not just use Valetudo's own UI
 
 You can, and you should — it ships with the root and it is good. This exists

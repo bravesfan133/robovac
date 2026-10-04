@@ -9,6 +9,11 @@ homebridge-valetudo-l40/node_modules/
 .env
 deploy/mosquitto/passwd
 
+# Unit-specific notes: serial, MAC, LAN IP, calibration data, recovery details.
+# This repo is public, so anything identifying your hardware or network belongs
+# here and never in a tracked file.
+local/
+
 # Rooting artefacts: samples, firmware images, calibration backups.
 # These contain eMMC dumps (including leftover camera images of your home) and
 # private keys. Never commit them.
