@@ -71,23 +71,21 @@ Then point `VALETUDO_URL` at it with `robot.implementation` set to
 
 ## Deployment
 
-Two compose files:
-
-| File | Image source |
-|---|---|
-| `docker-compose.yml` | Builds from source. No registry auth needed, but the server compiles Rust (~2-3 min, ~2GB scratch). |
-| `docker-compose.image.yml` | Pulls `ghcr.io/bravesfan133/robovac:main` from CI. No build, but the GHCR package must be set to **public** first. |
-
 ```sh
 cp .env.example .env && $EDITOR .env
-docker compose up -d --build          # or -f docker-compose.image.yml up -d
+docker compose up -d --build
 tailscale serve --bg --https=443 http://127.0.0.1:8080
 ```
 
+The image is built from source on the machine that runs it: no registry, no
+publishing step, no prebuilt artefact to keep in sync. First build takes a couple
+of minutes and needs roughly 2GB of scratch space for the Rust toolchain;
+`docker compose build` caches that, so later rebuilds only recompile the crate.
+
 Deploying through a Docker manager UI rather than the CLI? Note that:
 
-- set the **compose file path** to `docker-compose.yml` (or
-  `docker-compose.image.yml`) — the usual default is `compose.yaml`;
+- set the **compose file path** to `docker-compose.yml` — the usual default is
+  `compose.yaml`, which does not exist here;
 - environment variables go in the manager's own env panel, so no `.env` file is
   needed on disk;
 - `network_mode: host` requires Linux; it is ignored on Docker Desktop.
