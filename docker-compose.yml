@@ -40,9 +40,11 @@ services:
     container_name: robovac-mosquitto
     restart: unless-stopped
     ports:
-      # Bound to the LAN-facing address only; Valetudo needs to reach this to
-      # publish MQTT autodiscovery and state.
-      - "${MOSQUITTO_BIND:-192.0.2.1:1883}:1883"
+      # Required, not defaulted on purpose. Valetudo reaches the broker across
+      # the LAN, so this must be the host's LAN address and port. Binding
+      # 127.0.0.1 looks fine locally and silently breaks the vacuum, and a
+      # non-existent address fails with a cryptic docker error. Force it.
+      - "${MOSQUITTO_BIND:?set MOSQUITTO_BIND to your host LAN address, e.g. 192.0.2.1:1883}"
     volumes:
       - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mosquitto-data:/mosquitto/data
