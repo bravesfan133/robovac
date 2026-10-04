@@ -97,7 +97,7 @@ when a camera is involved.
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `VALETUDO_URL` | yes | Valetudo's address, e.g. `http://192.0.2.46` |
+| `VALETUDO_URL` | yes | Where to reach the vacuum. Prefer a hostname over an IP — see `docs/POST-ROOT.md` §2 |
 | `VALETUDO_USERNAME` / `VALETUDO_PASSWORD` | no | Valetudo's basic auth |
 | `WEB_USERNAME` / `WEB_PASSWORD` | no | A second auth layer in front of this UI. Both or neither. |
 | `BIND` | no | Listen address, default `0.0.0.0:8080` |
