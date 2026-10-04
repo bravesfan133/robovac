@@ -1,0 +1,79 @@
+name: Build and publish image
+
+# Publishes a multi-arch image so deployments do not need a Rust toolchain (or
+# several GB of scratch space) on the server running the stack.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Verifies the Dockerfile on a real Docker daemon, which nothing in the
+      # repo can do on its own. Build args are unused by this image.
+      - name: Smoke-test the native build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./robovac
+          load: true
+          tags: robovac:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Inspect the image
+        run: |
+          docker image inspect robovac:smoke --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes'
+          docker run --rm robovac:smoke --healthcheck; rc=$?
+          echo "healthcheck exit: $rc"
+          # 1 = the service is not running yet, which is the expected result
+          # when the probe has nothing to talk to. Anything else is a real bug.
+          test "$rc" -eq 0 -o "$rc" -eq 1
+
+      - name: Publish multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./robovac
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
