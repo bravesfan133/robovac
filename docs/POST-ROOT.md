@@ -20,8 +20,14 @@ installed.
 cp .env.example .env
 $EDITOR .env          # VALETUDO_URL is the only required value
 docker compose up -d --build
-curl -s localhost:8080/healthz | jq
+curl -s localhost:8080/healthz | jq   # process is up
+curl -s localhost:8080/readyz  | jq   # 503 until the robot answers
 ```
+
+`/healthz` is deliberately independent of the robot. The vacuum is off the
+network, asleep or unrooted for long stretches, and a healthcheck that reported
+unhealthy then would just invite the orchestrator to restart something that is
+fine. Use `/readyz` when you want to know the robot is actually reachable.
 
 Validate before handing the file to a GUI, since Compose's interpolation errors
 are terse:

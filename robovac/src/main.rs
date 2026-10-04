@@ -72,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/api/state", get(api_state))
         .route("/api/capabilities", get(api_capabilities))
         .route("/api/control/{action}", post(control))
@@ -147,7 +148,25 @@ fn template_error(err: askama::Error) -> Response {
         .into_response()
 }
 
-async fn healthz(State(state): State<AppState>) -> Response {
+/// Liveness. Answers 200 as long as this process is serving, *regardless* of
+/// whether the vacuum is reachable.
+///
+/// The container HEALTHCHECK points here, and a healthcheck that depends on an
+/// external service is wrong: the robot is off the network or still unrooted for
+/// long stretches, and reporting "unhealthy" then invites the orchestrator to
+/// restart something that is working perfectly well. Restarting would not fix
+/// it, because the cause is on the other end of the network.
+async fn healthz() -> Response {
+    Json(serde_json::json!({
+        "ok": true,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+    .into_response()
+}
+
+/// Readiness. 503 while the vacuum is unreachable, for anything that wants to
+/// gate on the robot actually being there.
+async fn readyz(State(state): State<AppState>) -> Response {
     match state.valetudo.info().await {
         Ok(info) => Json(serde_json::json!({
             "ok": true,
@@ -365,9 +384,16 @@ fn error_response(err: valetudo::ApiError) -> Response {
 
 async fn poll_loop(state: AppState, interval_ms: u64) {
     let interval = Duration::from_millis(interval_ms.max(250));
+    let mut consecutive_failures: u32 = 0;
+
     loop {
         match state.valetudo.state().await {
             Ok(s) => {
+                // Log the recovery once, not on every subsequent success.
+                if consecutive_failures > 0 {
+                    tracing::info!(failures = consecutive_failures, "reconnected to the vacuum");
+                    consecutive_failures = 0;
+                }
                 let summary = valetudo::Summary::from_state(&s);
                 let payload = serde_json::json!({
                     "summary": summary,
@@ -377,7 +403,24 @@ async fn poll_loop(state: AppState, interval_ms: u64) {
                 let _ = state.updates.send(payload);
             }
             Err(err) => {
-                tracing::debug!(%err, "poll failed");
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                // First failure, then every 30th. Debug level until it has been
+                // failing for a while, at which point it is worth a warning.
+                if consecutive_failures == 1 {
+                    tracing::debug!(error = %err, "poll failed");
+                } else if consecutive_failures == 30 {
+                    // Sustained failure is a real condition, not chatter.
+                    tracing::warn!(
+                        error = %err,
+                        "still cannot reach the vacuum after 30 attempts"
+                    );
+                } else if consecutive_failures % 300 == 0 {
+                    tracing::warn!(
+                        failures = consecutive_failures,
+                        error = %err,
+                        "still cannot reach the vacuum"
+                    );
+                }
                 let _ = state
                     .updates
                     .send(serde_json::json!({"summary": null, "error": err.to_string()}));

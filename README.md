@@ -109,7 +109,8 @@ when a camera is involved.
 | Route | |
 |---|---|
 | `GET /` | Dashboard |
-| `GET /healthz` | Liveness plus robot identity |
+| `GET /healthz` | Liveness. Always 200 while the process serves; the container healthcheck uses this, so it never depends on the robot |
+| `GET /readyz` | Readiness. 503 while the vacuum is unreachable |
 | `GET /map.svg` | Floor plan, rendered server-side |
 | `GET /api/state` | Raw Valetudo state |
 | `GET /api/capabilities` | Raw capability list |
