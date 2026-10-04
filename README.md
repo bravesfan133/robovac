@@ -71,11 +71,26 @@ Then point `VALETUDO_URL` at it with `robot.implementation` set to
 
 ## Deployment
 
+Two compose files:
+
+| File | Image source |
+|---|---|
+| `docker-compose.yml` | Builds from source. No registry auth needed, but the server compiles Rust (~2-3 min, ~2GB scratch). |
+| `docker-compose.image.yml` | Pulls `ghcr.io/bravesfan133/robovac:main` from CI. No build, but the GHCR package must be set to **public** first. |
+
 ```sh
 cp .env.example .env && $EDITOR .env
-docker compose up -d --build
+docker compose up -d --build          # or -f docker-compose.image.yml up -d
 tailscale serve --bg --https=443 http://127.0.0.1:8080
 ```
+
+Deploying through a Docker manager UI rather than the CLI? Note that:
+
+- set the **compose file path** to `docker-compose.yml` (or
+  `docker-compose.image.yml`) — the usual default is `compose.yaml`;
+- environment variables go in the manager's own env panel, so no `.env` file is
+  needed on disk;
+- `network_mode: host` requires Linux; it is ignored on Docker Desktop.
 
 See `docs/POST-ROOT.md` for MQTT, Tailscale and the security steps worth taking
 when a camera is involved.
