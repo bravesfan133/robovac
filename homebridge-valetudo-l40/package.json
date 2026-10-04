@@ -1,0 +1,30 @@
+{
+  "name": "homebridge-valetudo-l40",
+  "version": "0.1.0",
+  "description": "HomeKit bridge for Valetudo-enabled robot vacuums (Dreame L40 Ultra and friends)",
+  "license": "MIT",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "homekit",
+    "valetudo",
+    "dreame",
+    "vacuum"
+  ],
+  "scripts": {
+    "lint": "node --check index.js",
+    "prepublishOnly": "npm run lint"
+  },
+  "dependencies": {
+    "axios": "^1.7.7"
+  },
+  "devDependencies": {
+    "homebridge": "^1.8.0"
+  },
+  "peerDependencies": {
+    "homebridge": "^1.3.0"
+  }
+}

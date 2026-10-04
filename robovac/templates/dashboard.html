@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%232f7dd1'/></svg>">
+</head>
+<body>
+<header>
+  <h1>Robovac</h1>
+  <div class="identity">
+    {% if let Some(i) = info %}
+      <span class="model">{{ i.model_name }}</span>
+      <span class="muted">{{ i.manufacturer }} · {{ i.implementation }}</span>
+    {% else %}
+      <span class="muted">robot info unavailable</span>
+    {% endif %}
+  </div>
+  <div class="link {% if connected %}ok{% else %}bad{% endif %}">
+    {% if connected %}online{% else %}offline{% endif %}
+  </div>
+</header>
+
+{% if let Some(e) = error %}
+<p class="banner">{{ e }}</p>
+{% endif %}
+
+<main>
+  <section class="map-panel">
+    <img src="/map.svg" alt="Floor plan" class="map" id="map">
+    <p class="muted small">Map is rendered server-side from Valetudo's pixel data.</p>
+  </section>
+
+  <section class="controls">
+    <div class="status-row">
+      <div class="stat">
+        <span class="label">Status</span>
+        <span class="value">{{ summary.status.as_deref().unwrap_or("unknown") }}</span>
+        <span class="muted small">{{ summary.status_flag.as_deref().unwrap_or("") }}</span>
+      </div>
+      <div class="stat">
+        <span class="label">Battery</span>
+        <span class="value">{{ battery_display() }}</span>
+        <span class="muted small">{{ summary.battery_flag.as_deref().unwrap_or("") }}</span>
+      </div>
+      <div class="stat">
+        <span class="label">Dock</span>
+        <span class="value">{{ summary.dock_status.as_deref().unwrap_or("unknown") }}</span>
+        <span class="muted small">&nbsp;</span>
+      </div>
+    </div>
+
+    <div class="buttons">
+      <button data-action="start">Start</button>
+      <button data-action="pause">Pause</button>
+      <button data-action="stop">Stop</button>
+      <button data-action="home">Dock</button>
+    </div>
+
+    {% if let Some(e) = summary.error %}
+      <p class="banner">{{ e }}</p>
+    {% endif %}
+
+    {% if !fan_presets.is_empty() %}
+    <div class="field">
+      <label for="fan-speed">Fan speed</label>
+      <select id="fan-speed">
+        {% for preset in fan_presets %}
+          <option value="{{ preset }}"
+            {% if summary.fan_speed.as_deref() == Some(preset.as_str()) %}selected{% endif %}
+          >{{ preset }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endif %}
+
+    {% if let Some(mode) = summary.operation_mode.as_deref() %}
+    <div class="field"><span class="label">Mode</span><span class="value">{{ mode }}</span></div>
+    {% endif %}
+    {% if let Some(water) = summary.water_grade.as_deref() %}
+    <div class="field"><span class="label">Water</span><span class="value">{{ water }}</span></div>
+    {% endif %}
+  </section>
+
+  {% if !segments.is_empty() %}
+  <section class="segments">
+    <h2>Rooms</h2>
+    <p class="muted small">Pick rooms, then press Clean selected.</p>
+    <div class="chips">
+      {% for seg in segments %}
+        <label class="chip">
+          <input type="checkbox" name="segment" value="{{ seg.id }}" {% if seg.selected %}checked{% endif %}>
+          <span>{{ seg.name }}</span>
+        </label>
+      {% endfor %}
+    </div>
+    <form method="get" action="/">
+      {% for seg in segments %}
+        {% if seg.selected %}<input type="hidden" name="segments" value="{{ seg.id }}">{% endif %}
+      {% endfor %}
+      <button type="submit">Clean selected</button>
+    </form>
+  </section>
+  {% endif %}
+
+  {% if !consumables.is_empty() %}
+  <section class="consumables">
+    <h2>Consumables</h2>
+    <ul>
+      {% for c in consumables %}
+        <li>
+          <span class="label">{{ c.label }}</span>
+          {% if let Some(p) = c.percent %}
+            <progress value="{{ p }}" max="100"></progress>
+            <span class="muted">{{ p }}%</span>
+          {% else %}
+            <span class="muted">{{ c.value }} {{ c.unit }}</span>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  <section class="camera">
+    <h2>Camera</h2>
+    {% if let Some(cam) = camera %}
+      {% if cam.available %}
+        <video id="camera" autoplay muted playsinline width="{{ cam.width }}" height="{{ cam.height }}"></video>
+        <button id="camera-toggle">Start camera</button>
+        <p class="muted small">Local MPEG-TS straight off the robot. Enable it in Valetudo first.</p>
+      {% else %}
+        <p class="banner">The robot reports no local streamer installed.</p>
+      {% endif %}
+    {% else %}
+      <p class="muted">This robot exposes no camera capability.</p>
+    {% endif %}
+  </section>
+</main>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+# Rust
+robovac/target/
+
+# Node
+node_modules/
+homebridge-valetudo-l40/node_modules/
+
+# Local config and secrets
+.env
+deploy/mosquitto/passwd
+
+# Rooting artefacts: samples, firmware images, calibration backups.
+# These contain eMMC dumps (including leftover camera images of your home) and
+# private keys. Never commit them.
+dust*.bin
+*_samples.zip
+*_fel_ng.zip
+*.md5.txt
+*_buildflags.sh
+id_rsa
+id_rsa.pub
+backup.tar
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

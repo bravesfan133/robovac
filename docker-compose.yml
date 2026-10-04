@@ -1,0 +1,53 @@
+# Robovac control UI + MQTT broker, for a Valetudo-enabled vacuum.
+#
+# Ingress is handled by Tailscale on the host, not by a reverse proxy here:
+#   tailscale serve --bg --https=443 http://127.0.0.1:8080
+#
+# The vacuum itself is expected at VALETUDO_URL and must stay on the LAN. Only
+# this stack needs to be reachable from your tailnet.
+
+name: robovac
+
+services:
+  robovac:
+    build:
+      context: ./robovac
+    image: robovac:latest
+    container_name: robovac
+    restart: unless-stopped
+    # Host networking keeps the LAN address of the vacuum reachable without
+    # extra NAT, and lets `tailscale serve` target 127.0.0.1 directly.
+    network_mode: host
+    environment:
+      VALETUDO_URL: ${VALETUDO_URL:?set VALETUDO_URL, e.g. http://192.0.2.46}
+      # Valetudo's own basic auth, if enabled.
+      VALETUDO_USERNAME: ${VALETUDO_USERNAME:-}
+      VALETUDO_PASSWORD: ${VALETUDO_PASSWORD:-}
+      # A second layer in front of this UI. Set both or neither.
+      WEB_USERNAME: ${WEB_USERNAME:-}
+      WEB_PASSWORD: ${WEB_PASSWORD:-}
+      BIND: ${BIND:-0.0.0.0:8080}
+      RUST_LOG: ${RUST_LOG:-info,robovac=debug}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-2000}
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: robovac-mosquitto
+    restart: unless-stopped
+    ports:
+      # Bound to the LAN-facing address only; Valetudo needs to reach this to
+      # publish MQTT autodiscovery and state.
+      - "${MOSQUITTO_BIND:-192.0.2.1:1883}:1883"
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:
