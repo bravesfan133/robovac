@@ -8,7 +8,9 @@
 #   ./scripts/check-compose.sh
 #
 # Override the values it checks with by exporting them first, e.g.
-#   MOSQUITTO_HOST=10.0.0.5 ./scripts/check-compose.sh
+#   VALETUDO_URL=http://10.0.0.9:80 ./scripts/check-compose.sh
+#
+# Add -f docker-compose.mqtt.yml to the config command to check the overlay too.
 
 set -euo pipefail
 
@@ -20,8 +22,6 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 export VALETUDO_URL="${VALETUDO_URL:-http://192.0.2.46}"
-export MOSQUITTO_HOST="${MOSQUITTO_HOST:-192.0.2.1}"
-export MOSQUITTO_PORT="${MOSQUITTO_PORT:-1883}"
 
 echo "--- docker compose config ---"
 docker compose config

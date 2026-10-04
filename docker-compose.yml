@@ -1,10 +1,17 @@
-# Robovac control UI + MQTT broker, for a Valetudo-enabled vacuum.
+# Robovac control UI, for a Valetudo-enabled vacuum.
 #
 # Ingress is handled by Tailscale on the host, not by a reverse proxy here:
 #   tailscale serve --bg --https=443 http://127.0.0.1:8080
 #
-# The vacuum itself is expected at VALETUDO_URL and must stay on the LAN. Only
-# this stack needs to be reachable from your tailnet.
+# The vacuum is expected at VALETUDO_URL and stays on the LAN. Only this stack
+# needs to be reachable from your tailnet.
+#
+# MQTT is deliberately not included. Nothing here consumes it: robovac polls
+# Valetudo over HTTP and pushes updates to the browser with SSE. A broker is
+# only needed later for maploader (multi-floor maps) or Home Assistant
+# autodiscovery, so it lives in docker-compose.mqtt.yml as an opt-in overlay:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mqtt.yml up -d --build
 
 name: robovac
 
@@ -17,13 +24,16 @@ services:
     restart: unless-stopped
     # Host networking keeps the LAN address of the vacuum reachable without
     # extra NAT, and lets `tailscale serve` target 127.0.0.1 directly.
+    # Linux only; ignored on Docker Desktop.
     network_mode: host
     environment:
-      VALETUDO_URL: ${VALETUDO_URL:?set VALETUDO_URL, e.g. http://192.0.2.46}
-      # Valetudo's own basic auth, if enabled.
+      # The one required value: the vacuum's address on your LAN.
+      VALETUDO_URL: ${VALETUDO_URL:?set VALETUDO_URL to the robot's LAN address, e.g. http://192.0.2.46}
+      # Valetudo's own basic auth, if you enabled webserver.basicAuth.enabled.
       VALETUDO_USERNAME: ${VALETUDO_USERNAME:-}
       VALETUDO_PASSWORD: ${VALETUDO_PASSWORD:-}
-      # A second layer in front of this UI. Set both or neither.
+      # A second auth layer in front of this UI. Set both or neither; robovac
+      # refuses to start if only one is present.
       WEB_USERNAME: ${WEB_USERNAME:-}
       WEB_PASSWORD: ${WEB_PASSWORD:-}
       BIND: ${BIND:-0.0.0.0:8080}
@@ -34,28 +44,3 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-
-  mosquitto:
-    image: eclipse-mosquitto:2
-    container_name: robovac-mosquitto
-    restart: unless-stopped
-    ports:
-      # Split into host and port deliberately.
-      #
-      # HOST is required: Valetudo reaches this broker across the LAN, so
-      # binding 127.0.0.1 starts a broker that looks healthy and that the
-      # vacuum can never reach, while a non-existent address fails with a
-      # cryptic docker error. Hence :? rather than a default.
-      #
-      # A single "ip:port" variable is worse: a bare LAN address fails with
-      # `invalid hostPort`, which is a miserable way to learn you left the
-      # port off.
-      - "${MOSQUITTO_HOST:?set MOSQUITTO_HOST to this host's LAN address, e.g. 192.0.2.1}:${MOSQUITTO_PORT:-1883}:1883"
-    volumes:
-      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - mosquitto-data:/mosquitto/data
-      - mosquitto-log:/mosquitto/log
-
-volumes:
-  mosquitto-data:
-  mosquitto-log:

@@ -1,0 +1,38 @@
+# Optional MQTT broker. Not part of the default deployment.
+#
+# Nothing in robovac consumes MQTT: the UI polls Valetudo over HTTP and pushes
+# updates to the browser over SSE. Add this only when you need a broker for
+# something else, namely:
+#
+#   - maploader, for save/restore of Valetudo maps on multi-floor homes
+#     https://github.com/pkoehlers/maploader
+#   - Home Assistant MQTT autodiscovery, if you ever run it
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.mqtt.yml up -d --build
+#
+# Then point Valetudo at it: Settings -> Connectivity -> MQTT, using
+# MOSQUITTO_HOST below as the broker address.
+
+name: robovac
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: robovac-mosquitto
+    restart: unless-stopped
+    ports:
+      # Split into host and port deliberately. HOST is required because
+      # Valetudo reaches this broker across the LAN: binding 127.0.0.1 starts a
+      # broker that looks healthy and that the vacuum can never reach. A single
+      # "ip:port" variable is worse, since a bare address fails with a terse
+      # `invalid hostPort`.
+      - "${MOSQUITTO_HOST:?set MOSQUITTO_HOST to this host's LAN address, e.g. 192.0.2.1}:${MOSQUITTO_PORT:-1883}:1883"
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:

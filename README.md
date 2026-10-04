@@ -87,7 +87,7 @@ Deploying through a Docker manager UI rather than the CLI? Note that:
 - set the **compose file path** to `docker-compose.yml` — the usual default is
   `compose.yaml`, which does not exist here;
 - environment variables go in the manager's own env panel, so no `.env` file is
-  needed on disk;
+  needed on disk. Only `VALETUDO_URL` is required;
 - `network_mode: host` requires Linux; it is ignored on Docker Desktop.
 
 See `docs/POST-ROOT.md` for MQTT, Tailscale and the security steps worth taking
@@ -102,8 +102,6 @@ when a camera is involved.
 | `WEB_USERNAME` / `WEB_PASSWORD` | no | A second auth layer in front of this UI. Both or neither. |
 | `BIND` | no | Listen address, default `0.0.0.0:8080` |
 | `POLL_INTERVAL_MS` | no | State poll interval, default 2000 |
-| `MOSQUITTO_HOST` | deploy | Host LAN address the broker publishes on. Host only — no port |
-| `MOSQUITTO_PORT` | deploy | Broker port, default 1883 |
 | `RUST_LOG` | no | `info,robovac=debug` is useful |
 
 ## HTTP API

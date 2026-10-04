@@ -18,30 +18,44 @@ installed.
 
 ```sh
 cp .env.example .env
-$EDITOR .env          # VALETUDO_URL, MOSQUITTO_HOST (your host's LAN IP, no port)
+$EDITOR .env          # VALETUDO_URL is the only required value
 docker compose up -d --build
 curl -s localhost:8080/healthz | jq
 ```
 
-`MOSQUITTO_HOST` must be your host's LAN address, not `127.0.0.1`, or the vacuum
-cannot reach the broker. It is host-only; the port comes from `MOSQUITTO_PORT`
-(default 1883). To check the file parses before handing it to a GUI:
+Validate before handing the file to a GUI, since Compose's interpolation errors
+are terse:
 
 ```sh
 ./scripts/check-compose.sh
 ```
 
-On macOS Docker Desktop, `network_mode: host` does not behave like Linux; test
-the UI through the published port or run the stack on the real server.
+If you deploy through a manager UI rather than the CLI, it will not read `.env`
+from disk — set `VALETUDO_URL` in its own environment panel instead. On macOS
+Docker Desktop, `network_mode: host` does not behave like Linux; test the UI
+through the published port or run the stack on the real server.
 
-## 3. Wire MQTT in Valetudo
+## 3. MQTT (only if you need it)
 
-In Valetudo: Settings → Connectivity → MQTT. Point it at your host's LAN
-address, port 1883. Enable Home Assistant discovery if you want it — harmless
-even without Home Assistant, and it makes the broker self-describing.
+**Skip this unless you are adding maploader or Home Assistant.** robovac does not
+use MQTT: it polls Valetudo over HTTP and streams updates to the browser over
+SSE. Starting the stack without a broker is the supported configuration.
 
-Note the **base topic** shown in that page. It is the robot id you will see in
-MQTT topics.
+When you do want one — for multi-floor map switching, for instance — bring it up
+as an overlay:
+
+```sh
+$EDITOR .env            # uncomment MOSQUITTO_HOST, set it to this host's LAN IP
+docker compose -f docker-compose.yml -f docker-compose.mqtt.yml up -d
+```
+
+Then in Valetudo: Settings → Connectivity → MQTT, pointing at that address and
+port 1883. Note the **base topic** shown there; it is the robot id that appears
+in MQTT topics.
+
+Security note: the bundled broker allows anonymous clients, which is fine on an
+isolated LAN and wrong anywhere else. See `deploy/mosquitto/mosquitto.conf` for
+adding a password file and ACLs.
 
 ## 4. Expose it over Tailscale
 
