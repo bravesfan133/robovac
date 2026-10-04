@@ -40,11 +40,17 @@ services:
     container_name: robovac-mosquitto
     restart: unless-stopped
     ports:
-      # Required, not defaulted on purpose. Valetudo reaches the broker across
-      # the LAN, so this must be the host's LAN address and port. Binding
-      # 127.0.0.1 looks fine locally and silently breaks the vacuum, and a
-      # non-existent address fails with a cryptic docker error. Force it.
-      - "${MOSQUITTO_BIND:?set MOSQUITTO_BIND to your host LAN address, e.g. 192.0.2.1:1883}"
+      # Split into host and port deliberately.
+      #
+      # HOST is required: Valetudo reaches this broker across the LAN, so
+      # binding 127.0.0.1 starts a broker that looks healthy and that the
+      # vacuum can never reach, while a non-existent address fails with a
+      # cryptic docker error. Hence :? rather than a default.
+      #
+      # A single "ip:port" variable is worse: a bare LAN address fails with
+      # `invalid hostPort`, which is a miserable way to learn you left the
+      # port off.
+      - "${MOSQUITTO_HOST:?set MOSQUITTO_HOST to this host's LAN address, e.g. 192.0.2.1}:${MOSQUITTO_PORT:-1883}:1883"
     volumes:
       - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mosquitto-data:/mosquitto/data

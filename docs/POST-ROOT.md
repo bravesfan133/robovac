@@ -18,15 +18,21 @@ installed.
 
 ```sh
 cp .env.example .env
-$EDITOR .env          # VALETUDO_URL, MOSQUITTO_BIND (your host's LAN IP)
+$EDITOR .env          # VALETUDO_URL, MOSQUITTO_HOST (your host's LAN IP, no port)
 docker compose up -d --build
 curl -s localhost:8080/healthz | jq
 ```
 
-`MOSQUITTO_BIND` must be your host's LAN address, not `127.0.0.1`, or the vacuum
-cannot reach the broker. On macOS Docker Desktop, `network_mode: host` does not
-behave like Linux; test the UI through the published port or run the stack on the
-real server.
+`MOSQUITTO_HOST` must be your host's LAN address, not `127.0.0.1`, or the vacuum
+cannot reach the broker. It is host-only; the port comes from `MOSQUITTO_PORT`
+(default 1883). To check the file parses before handing it to a GUI:
+
+```sh
+./scripts/check-compose.sh
+```
+
+On macOS Docker Desktop, `network_mode: host` does not behave like Linux; test
+the UI through the published port or run the stack on the real server.
 
 ## 3. Wire MQTT in Valetudo
 
