@@ -324,16 +324,6 @@ mod tests {
         assert!(snap.last_ok.is_some());
     }
 
-    /// Counts how many times the map was actually re-rendered.
-    fn counting_render<'c>(
-        renders: &'c std::cell::Cell<u32>,
-    ) -> impl for<'a> Fn(&'a MapData) -> String + 'c {
-        move |_: &MapData| {
-            renders.set(renders.get() + 1);
-            "<svg/>".to_string()
-        }
-    }
-
     #[test]
     fn map_is_stored_and_renderable() {
         let cache = RobotCache::new();
