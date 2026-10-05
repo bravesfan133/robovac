@@ -1,0 +1,6 @@
+/* Served on every navigation so the app shell opens with no network. Deliberately
+   tiny: it only needs to cover the unstyled first paint, since app.css provides
+   everything else. */
+:root { color-scheme: dark; }
+body { margin: 0; background: #14161a; color: #e6e8ec; }
+main, header { opacity: 0; }

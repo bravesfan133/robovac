@@ -113,6 +113,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/events", get(events))
         .route("/static/style.css", get(static_style))
         .route("/static/app.js", get(static_app))
+        .route("/static/app.css", get(static_shell))
+        .route("/static/manifest.webmanifest", get(manifest))
+        .route("/static/service-worker.js", get(service_worker))
+        .route("/static/icons/{name}", get(icon))
         .layer(axum::middleware::from_fn_with_state(
             cfg.clone(),
             auth_layer,
@@ -574,6 +578,104 @@ async fn static_style() -> Response {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         STYLE_CSS,
+    )
+        .into_response()
+}
+
+/// App-shell stylesheet. Long-lived so a repeat visit paints correctly even when
+/// the network is unavailable, which is exactly when the UI matters most.
+async fn static_shell() -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/css; charset=utf-8"),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=600"),
+            ),
+        ],
+        include_str!("static/app.css"),
+    )
+        .into_response()
+}
+
+/// The manifest names icons, so it has to be reachable without the cache.
+async fn manifest() -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/manifest+json"),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=600"),
+            ),
+        ],
+        include_str!("static/manifest.webmanifest"),
+    )
+        .into_response()
+}
+
+/// Cache the shell, never the API.
+///
+/// The state and map are live data: serving a stale map because it was cached
+/// would be actively misleading about where a robot is. Commands are never
+/// cached at all.
+async fn service_worker() -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/javascript; charset=utf-8"),
+            ),
+            // Without this a browser will not re-check the worker after an
+            // update, so a new release would never be picked up.
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+        ],
+        include_str!("static/service-worker.js"),
+    )
+        .into_response()
+}
+
+async fn icon(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    // A fixed set of assets, matched explicitly rather than joined onto a path,
+    // so this route cannot be talked into reading arbitrary files.
+    let (body, content_type): (Vec<u8>, &str) = match name.as_str() {
+        "icon.svg" => (
+            include_bytes!("static/icons/icon.svg").to_vec(),
+            "image/svg+xml",
+        ),
+        "icon-maskable.svg" => (
+            include_bytes!("static/icons/icon-maskable.svg").to_vec(),
+            "image/svg+xml",
+        ),
+        "icon-192.png" => (
+            include_bytes!("static/icons/icon-192.png").to_vec(),
+            "image/png",
+        ),
+        "icon-512.png" => (
+            include_bytes!("static/icons/icon-512.png").to_vec(),
+            "image/png",
+        ),
+        "apple-touch-icon.png" => (
+            include_bytes!("static/icons/apple-touch-icon.png").to_vec(),
+            "image/png",
+        ),
+        _ => return (StatusCode::NOT_FOUND, "no such icon").into_response(),
+    };
+
+    (
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=86400"),
+            ),
+        ],
+        body,
     )
         .into_response()
 }

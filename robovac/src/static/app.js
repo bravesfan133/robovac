@@ -462,6 +462,18 @@ if (cameraBtn) {
 
 // --- boot --------------------------------------------------------------------
 
+// --- offline shell -----------------------------------------------------------
+
+// Registered so the UI opens with no network, which is exactly when the robot
+// tends to be unreachable. Only the shell is cached; live data never is.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/static/service-worker.js').catch(() => {
+      // Not fatal: everything except the offline shell works without it.
+    });
+  });
+}
+
 // Server-rendered state is already in the DOM, so the first paint needs no JS.
 syncSelection();
 wireZoneDrawing();
