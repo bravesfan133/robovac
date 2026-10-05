@@ -516,7 +516,6 @@ fn validate_obstacle_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-
 async fn camera_stream(State(state): State<AppState>) -> Response {
     let resp = match state
         .valetudo
@@ -660,7 +659,7 @@ async fn poll_loop(state: AppState, interval_ms: u64) {
                 } else if consecutive_failures % 300 == 0 {
                     tracing::warn!(failures = consecutive_failures, error = %err, "still cannot reach the vacuum");
                 }
-                state.cache.record_failure(err.to_string());
+                state.cache.record_failure(err.to_string(), err.failure());
             }
         }
 

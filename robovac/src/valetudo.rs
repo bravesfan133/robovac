@@ -153,11 +153,107 @@ struct SegmentCleanBody {
     iterations: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    /// The hostname could not be resolved. Usually a wrong name rather than a
+    /// problem with the robot.
+    UnresolvedHost,
+    /// Nothing is listening on that address: robot powered off, not yet
+    /// rooted, or on a different address.
+    ConnectionRefused,
+    /// The address is unroutable or the host did not answer.
+    Unreachable,
+    /// The request took too long, which on a busy LAN usually means the robot is
+    /// mid-task rather than gone.
+    Timeout,
+    /// Credentials rejected. Almost always Valetudo's basic auth being enabled
+    /// without `VALETUDO_USERNAME`/`VALETUDO_PASSWORD` being set here.
+    Unauthorized,
+    /// Authenticated but not allowed.
+    Forbidden,
+    /// The robot answered, with something other than success.
+    Status { status: u16, detail: Option<String> },
+    /// The robot answered, but not with anything we understand.
+    Decode,
+}
+
+impl Failure {
+    /// A short label for the status pill.
+    pub fn summary(&self) -> &'static str {
+        match self {
+            Failure::UnresolvedHost => "name not resolving",
+            Failure::ConnectionRefused => "nothing listening",
+            Failure::Unreachable => "host unreachable",
+            Failure::Timeout => "timed out",
+            Failure::Unauthorized => "needs credentials",
+            Failure::Forbidden => "refused access",
+            Failure::Status { .. } => "unexpected reply",
+            Failure::Decode => "unreadable reply",
+        }
+    }
+
+    /// What the user can actually do about it.
+    pub fn advice(&self) -> &'static str {
+        match self {
+            Failure::UnresolvedHost => "Check the name. Valetudo advertises itself as valetudo-<robot-id>.local; an IP also works.",
+            Failure::ConnectionRefused => "Nothing is answering on that port. Is the robot powered on and rooted, and is this its current address?",
+            Failure::Unreachable => "The address did not respond at all. Check the vacuum is on the same network.",
+            Failure::Timeout => "No answer in time. The robot may be busy mid-cleanup; this usually resolves itself.",
+            Failure::Unauthorized => "Set VALETUDO_USERNAME and VALETUDO_PASSWORD to match Valetudo's basic auth.",
+            Failure::Forbidden => "Those credentials were rejected. Check the username and password.",
+            Failure::Status { status, .. } => match status {
+                404 => "That endpoint does not exist. The Valetudo version may be older than this UI expects.",
+                429 => "Rate limited by Valetudo. Wait a moment and retry.",
+                503 => "Valetudo reports it is not ready. Its camera streamer may be missing.",
+                _ => "Valetudo answered with an error. Check its own logs on the robot.",
+            },
+            Failure::Decode => "The reply was not the expected format. A newer or older Valetudo may disagree with this UI.",
+        }
+    }
+
+    pub fn from_status(status: u16, detail: Option<String>) -> Self {
+        match status {
+            401 => Failure::Unauthorized,
+            403 => Failure::Forbidden,
+            other => Failure::Status {
+                status: other,
+                detail,
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ApiError {
     Transport(String),
     Status { status: u16, detail: Option<String> },
     Decode(String),
+}
+
+impl ApiError {
+    /// The classified form, used for the diagnostics panel.
+    pub fn failure(&self) -> Failure {
+        match self {
+            ApiError::Transport(msg) => {
+                // The transport string is built from the same reqwest error, so
+                // re-classify from the text when the cause is unavailable.
+                if msg.contains("timed out") || msg.contains("timeout") {
+                    Failure::Timeout
+                } else if msg.contains("Connection refused") {
+                    Failure::ConnectionRefused
+                } else if msg.contains("Name or service not known")
+                    || msg.contains("nodename nor servname")
+                    || msg.contains("Temporary failure in name resolution")
+                {
+                    Failure::UnresolvedHost
+                } else {
+                    Failure::Unreachable
+                }
+            }
+            ApiError::Status { status, detail } => Failure::from_status(*status, detail.clone()),
+            ApiError::Decode(_) => Failure::Decode,
+        }
+    }
 }
 
 impl std::fmt::Display for ApiError {
@@ -516,7 +612,28 @@ fn percent_encode(input: &str) -> String {
 }
 
 fn transport(e: reqwest::Error) -> ApiError {
-    ApiError::Transport(e.to_string())
+    ApiError::Transport(describe_transport(&e))
+}
+
+/// Flatten an error and its causes into one string.
+///
+/// `reqwest::Error::to_string()` is only "error sending request for url"; the
+/// part that identifies the problem is the OS-level cause further down the chain
+/// ("Connection refused", "Name or service not known"). Without the chain the
+/// diagnostics can only say "something went wrong", which is useless.
+fn describe_transport(err: &reqwest::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source = std::error::Error::source(err as &dyn std::error::Error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        // Stop before the URL, which adds nothing and can be long.
+        if text.starts_with("for url") {
+            break;
+        }
+        parts.push(text);
+        source = cause.source();
+    }
+    parts.join(": ")
 }
 
 async fn check_empty(resp: reqwest::Response) -> Result<(), ApiError> {
@@ -564,6 +681,76 @@ mod tests {
         let state: RobotState = serde_json::from_str("{}").expect("empty state should parse");
         assert!(state.attributes.is_empty());
         assert!(Summary::from_state(&state).status.is_none());
+    }
+
+    #[test]
+    fn transport_failures_are_classified() {
+        let classify = |msg: &str| ApiError::Transport(msg.to_string()).failure();
+        assert_eq!(
+            classify("error sending request for url"),
+            Failure::Unreachable
+        );
+        assert_eq!(
+            classify("Connection refused (os error 61)"),
+            Failure::ConnectionRefused
+        );
+        assert_eq!(
+            classify("dns error: failed to lookup address information: Name or service not known"),
+            Failure::UnresolvedHost
+        );
+        assert_eq!(classify("operation timed out"), Failure::Timeout);
+    }
+
+    #[test]
+    fn status_failures_are_classified() {
+        assert_eq!(
+            ApiError::Status {
+                status: 401,
+                detail: None
+            }
+            .failure(),
+            Failure::Unauthorized
+        );
+        assert_eq!(
+            ApiError::Status {
+                status: 403,
+                detail: None
+            }
+            .failure(),
+            Failure::Forbidden
+        );
+        assert_eq!(
+            ApiError::Status {
+                status: 503,
+                detail: None
+            }
+            .failure(),
+            Failure::Status {
+                status: 503,
+                detail: None
+            }
+        );
+        assert_eq!(ApiError::Decode("x".into()).failure(), Failure::Decode);
+    }
+
+    #[test]
+    fn every_failure_has_advice() {
+        for failure in [
+            Failure::UnresolvedHost,
+            Failure::ConnectionRefused,
+            Failure::Unreachable,
+            Failure::Timeout,
+            Failure::Unauthorized,
+            Failure::Forbidden,
+            Failure::Status {
+                status: 404,
+                detail: None,
+            },
+            Failure::Decode,
+        ] {
+            assert!(!failure.summary().is_empty());
+            assert!(!failure.advice().is_empty());
+        }
     }
 
     #[test]

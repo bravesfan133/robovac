@@ -56,6 +56,9 @@ struct Inner {
     obstacles: Vec<Obstacle>,
     last_ok: Option<Instant>,
     last_error: Option<String>,
+    /// Classified form of `last_error`, so the UI can explain rather than
+    /// merely report.
+    last_failure: Option<crate::valetudo::Failure>,
     /// True once a poll has ever succeeded, so "never worked" and "broke" are
     /// distinguishable in the diagnostics panel.
     ever_ok: bool,
@@ -77,6 +80,7 @@ impl Default for RobotCache {
                 obstacles: Vec::new(),
                 last_ok: None,
                 last_error: None,
+                last_failure: None,
                 ever_ok: false,
             }),
         }
@@ -95,6 +99,7 @@ pub struct Snapshot {
     pub map_version: u64,
     pub last_ok: Option<Instant>,
     pub last_error: Option<String>,
+    pub last_failure: Option<crate::valetudo::Failure>,
     pub ever_ok: bool,
     pub obstacles: Vec<Obstacle>,
     /// False before the first successful poll, so handlers can distinguish
@@ -162,6 +167,7 @@ impl RobotCache {
             map_version: inner.map_version,
             last_ok: inner.last_ok,
             last_error: inner.last_error.clone(),
+            last_failure: inner.last_failure.clone(),
             ever_ok: inner.ever_ok,
             obstacles: inner.obstacles.clone(),
             warm: inner.last_ok.is_some(),
@@ -172,12 +178,14 @@ impl RobotCache {
         let mut inner = self.write();
         inner.last_ok = Some(Instant::now());
         inner.last_error = None;
+        inner.last_failure = None;
         inner.ever_ok = true;
     }
 
-    pub fn record_failure(&self, message: String) {
+    pub fn record_failure(&self, message: String, failure: crate::valetudo::Failure) {
         let mut inner = self.write();
         inner.last_error = Some(message);
+        inner.last_failure = Some(failure);
     }
 
     pub fn update_info(&self, info: RobotInfo) {
@@ -362,7 +370,7 @@ mod tests {
     #[test]
     fn success_marks_warm_and_clears_error() {
         let cache = RobotCache::new();
-        cache.record_failure("boom".into());
+        cache.record_failure("boom".into(), crate::valetudo::Failure::ConnectionRefused);
         assert!(cache.snapshot().last_error.is_some());
 
         cache.record_success();
@@ -370,6 +378,7 @@ mod tests {
         assert!(snap.warm);
         assert!(snap.ever_ok);
         assert!(snap.last_error.is_none());
+        assert!(snap.last_failure.is_none(), "recovery clears the diagnosis");
         assert!(snap.last_ok.is_some());
     }
 
@@ -425,6 +434,21 @@ mod tests {
         assert!(selected.contains("data-segment-id=\"2\" data-selected=\"true\""));
         // ...and switching back must not return the stale selected render.
         assert_eq!(first, cache.render_map(&[]).unwrap());
+    }
+
+    #[test]
+    fn failure_is_recorded_with_its_classification() {
+        let cache = RobotCache::new();
+        cache.record_failure(
+            "refused".into(),
+            crate::valetudo::Failure::ConnectionRefused,
+        );
+        let snap = cache.snapshot();
+        assert_eq!(
+            snap.last_failure,
+            Some(crate::valetudo::Failure::ConnectionRefused)
+        );
+        assert!(snap.last_failure.unwrap().advice().contains("powered on"));
     }
 
     #[test]

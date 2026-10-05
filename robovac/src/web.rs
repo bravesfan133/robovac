@@ -22,6 +22,10 @@ pub struct Dashboard<'a> {
     /// template renders differently.
     pub ever_connected: bool,
     pub error: Option<String>,
+    /// Classified cause, rendered as a short heading.
+    pub failure_summary: Option<String>,
+    /// What the user can do about it.
+    pub failure_advice: Option<String>,
     pub contact_note: Option<String>,
     pub selected_segments: Vec<String>,
 }
@@ -111,6 +115,8 @@ impl<'a> Dashboard<'a> {
             connected: false,
             ever_connected: false,
             error: None,
+            failure_summary: None,
+            failure_advice: None,
             contact_note: None,
             selected_segments: Vec::new(),
         }
@@ -182,6 +188,8 @@ impl<'a> Dashboard<'a> {
             connected: snap.warm,
             ever_connected: snap.ever_ok,
             error: snap.last_error.clone(),
+            failure_summary: snap.last_failure.as_ref().map(|f| f.summary().to_string()),
+            failure_advice: snap.last_failure.as_ref().map(|f| f.advice().to_string()),
             contact_note,
             selected_segments: selected,
         }

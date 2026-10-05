@@ -30,7 +30,15 @@
 </header>
 
 {% if let Some(e) = error %}
-<p class="banner" data-role="error">{{ e }}</p>
+<div class="banner" data-role="error">
+  {% if let Some(s) = failure_summary %}
+    <strong>{{ s }}</strong>
+  {% endif %}
+  <p>{{ e }}</p>
+  {% if let Some(a) = failure_advice %}
+    <p class="muted">{{ a }}</p>
+  {% endif %}
+</div>
 {% endif %}
 
 <main>

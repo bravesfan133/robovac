@@ -34,6 +34,10 @@ process.on("SIGUSR2", tallyDump);
 process.on("SIGTERM", () => { tallyDump(); process.exit(0); });
 process.on("SIGINT", () => { tallyDump(); process.exit(0); });
 
+// Optional basic auth, to exercise the credentials path.
+const FAKE_USER = process.env.FAKE_USER;
+const FAKE_PASS = process.env.FAKE_PASS;
+
 const robot = {
   status: "docked",
   battery: 100,
@@ -195,6 +199,16 @@ createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
   const path = url.pathname;
   tally(req.method, path);
+
+  if (FAKE_USER) {
+    const header = req.headers.authorization ?? "";
+    const expected = "Basic " + Buffer.from(`${FAKE_USER}:${FAKE_PASS}`).toString("base64");
+    if (header !== expected) {
+      res.writeHead(401, { "www-authenticate": 'Basic realm="valetudo"' });
+      res.end("Unauthorized");
+      return;
+    }
+  }
 
   // Consume the body so keep-alive stays in sync.
   req.resume();
