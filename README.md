@@ -55,6 +55,10 @@ Tests:
 cd robovac && cargo test
 ```
 
+93 tests: unit coverage for the map renderer, coordinate conversion, SSE parser,
+byte cache and auth, plus HTTP-level tests that build the real router and assert
+routing, status codes and rendered output. No Node and no network required.
+
 ### Against the real thing
 
 Valetudo ships a mock robot implementation, which is useful for exercising the
@@ -104,6 +108,33 @@ when a camera is involved.
 | `POLL_INTERVAL_MS` | no | State poll interval, default 2000 |
 | `RUST_LOG` | no | `info,robovac=debug` is useful |
 
+## How it works
+
+The design point worth knowing: **only a background poller contacts the robot.**
+
+Valetudo has an expensive read and cheap ones. `GET /state` calls `pollState()`
+and talks to the vacuum over miio, costing about a second. `GET /state/map` and
+`GET /state/attributes` serve Valetudo's own cached copy for free. Every handler
+here answers from an in-process cache that the poller fills, so a page load
+costs zero robot round trips and renders instantly.
+
+Map changes arrive over a single upstream event subscription, fanned out to
+browsers. Valetudo caps that endpoint at five clients, so one per browser would
+waste the budget; five browsers still produce exactly one upstream connection.
+
+## Features
+
+- Click a room on the map to select it, or click its name to clean just that
+  room. Selection lives in the URL, so it survives a reload.
+- Draw zones to clean a specific area, capped at 4 per run, which is this model's
+  own limit.
+- Live map and status with no page reload.
+- Obstacle photos, loaded on demand and cached, since Valetudo rate-limits that
+  endpoint hard.
+- Failures are classified and explained rather than reported as "error sending
+  request".
+- Installable as an app; the shell works with no network.
+
 ## HTTP API
 
 | Route | |
@@ -111,15 +142,25 @@ when a camera is involved.
 | `GET /` | Dashboard |
 | `GET /healthz` | Liveness. Always 200 while the process serves; the container healthcheck uses this, so it never depends on the robot |
 | `GET /readyz` | Readiness. 503 while the vacuum is unreachable |
-| `GET /map.svg` | Floor plan, rendered server-side |
-| `GET /api/state` | Raw Valetudo state |
+| `GET /map.svg` | Floor plan, rendered server-side. `?segments=1,2` renders a selection |
+| `GET /api/state` | Flattened state for the frontend |
 | `GET /api/capabilities` | Raw capability list |
+| `GET /api/obstacles` | Obstacles the robot reported |
+| `GET /api/obstacles/image?id=` | One obstacle photo, proxied and cached |
 | `GET /api/camera/properties` | Camera dimensions / streamer presence |
 | `GET /api/camera/stream` | Proxied MPEG-TS stream |
 | `GET /events` | SSE state updates |
 | `POST /api/control/{start,stop,pause,home}` | Basic control |
 | `POST /api/fan-speed` | `{"name":"turbo"}` |
 | `POST /api/clean-segments` | `{"segment_ids":["1","2"],"iterations":1}` |
+| `POST /api/clean-zones` | `{"zones":[[x0,y0,x1,y1]]}` in map pixels |
+| `POST /api/obstacles/enabled` | `{"enabled":true}` |
+
+## Troubleshooting
+
+`docs/TROUBLESHOOTING.md` covers what each diagnostic means, how to confirm a
+problem is on the server rather than the robot, and recovery after a failed
+flash.
 
 ## Licence
 

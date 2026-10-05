@@ -3,6 +3,8 @@ mod cache;
 mod config;
 mod map;
 mod sse;
+#[cfg(test)]
+mod tests;
 mod upstream;
 mod valetudo;
 mod web;
@@ -94,43 +96,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("BIND {:?} is not a valid socket address: {e}", cfg.bind))?;
 
-    let app = Router::new()
-        .route("/", get(index))
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/api/state", get(api_state))
-        .route("/api/capabilities", get(api_capabilities))
-        .route("/api/control/{action}", post(control))
-        .route("/api/fan-speed", post(set_fan_speed))
-        .route("/api/clean-segments", post(clean_segments))
-        .route("/api/clean-zones", post(clean_zones))
-        .route("/api/obstacles", get(api_obstacles))
-        .route("/api/obstacles/enabled", post(set_obstacle_images))
-        .route("/api/obstacles/image", get(obstacle_image))
-        .route("/map.svg", get(map_svg))
-        .route("/api/camera/stream", get(camera_stream))
-        .route("/api/camera/properties", get(camera_properties))
-        .route("/events", get(events))
-        .route("/static/style.css", get(static_style))
-        .route("/static/app.js", get(static_app))
-        .route("/static/app.css", get(static_shell))
-        .route("/static/manifest.webmanifest", get(manifest))
-        .route("/static/service-worker.js", get(service_worker))
-        .route("/static/icons/{name}", get(icon))
-        .layer(axum::middleware::from_fn_with_state(
-            cfg.clone(),
-            auth_layer,
-        ))
-        .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
-        .with_state(AppState {
-            valetudo,
-            cache,
-            updates,
-            // 16 MB is plenty for a few dozen camera frames and keeps the
-            // resident footprint trivial next to the robot itself.
-            obstacle_cache: Arc::new(ByteCache::new(16 * 1024 * 1024, Duration::from_secs(300))),
-        });
+    // 16 MB holds a few dozen camera frames and keeps the resident footprint
+    // trivial next to the robot itself.
+    let obstacle_cache = Arc::new(ByteCache::new(16 * 1024 * 1024, Duration::from_secs(300)));
+    let app = build_router(valetudo, cache, updates, obstacle_cache, cfg.clone());
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "listening");
@@ -185,6 +154,54 @@ fn rendering(html: Result<String, askama::Error>) -> String {
 /// long stretches, and reporting "unhealthy" then invites the orchestrator to
 /// restart something that is working perfectly well. Restarting would not fix
 /// it, because the cause is on the other end of the network.
+/// Assemble the router.
+///
+/// Split out from `main` so the integration tests build exactly the app that
+/// ships, rather than a lookalike that can drift from it.
+pub(crate) fn build_router(
+    valetudo: Valetudo,
+    cache: Arc<RobotCache>,
+    updates: broadcast::Sender<serde_json::Value>,
+    obstacle_cache: Arc<ByteCache>,
+    cfg: Config,
+) -> Router {
+    Router::new()
+        .route("/", get(index))
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/api/state", get(api_state))
+        .route("/api/capabilities", get(api_capabilities))
+        .route("/api/control/{action}", post(control))
+        .route("/api/fan-speed", post(set_fan_speed))
+        .route("/api/clean-segments", post(clean_segments))
+        .route("/api/clean-zones", post(clean_zones))
+        .route("/api/obstacles", get(api_obstacles))
+        .route("/api/obstacles/enabled", post(set_obstacle_images))
+        .route("/api/obstacles/image", get(obstacle_image))
+        .route("/map.svg", get(map_svg))
+        .route("/api/camera/stream", get(camera_stream))
+        .route("/api/camera/properties", get(camera_properties))
+        .route("/events", get(events))
+        .route("/static/style.css", get(static_style))
+        .route("/static/app.js", get(static_app))
+        .route("/static/app.css", get(static_shell))
+        .route("/static/manifest.webmanifest", get(manifest))
+        .route("/static/service-worker.js", get(service_worker))
+        .route("/static/icons/{name}", get(icon))
+        .layer(axum::middleware::from_fn_with_state(
+            cfg.clone(),
+            auth_layer,
+        ))
+        .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http())
+        .with_state(AppState {
+            valetudo,
+            cache,
+            updates,
+            obstacle_cache,
+        })
+}
+
 async fn healthz() -> Response {
     Json(serde_json::json!({
         "ok": true,
@@ -292,7 +309,7 @@ async fn map_svg(State(state): State<AppState>, Query(q): Query<IndexQuery>) -> 
             (
                 header::CACHE_CONTROL,
                 if selected.is_empty() {
-                    "public, max-age=2"
+                    "private, max-age=2"
                 } else {
                     "no-store"
                 },
