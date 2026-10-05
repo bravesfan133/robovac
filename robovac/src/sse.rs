@@ -45,7 +45,9 @@ impl SseParser {
         events
     }
 
-    /// Bytes buffered but not yet terminated by a blank line.
+    /// Bytes buffered but not yet terminated by a blank line. Used by the tests
+    /// to assert that discarded blocks (comments, `retry:`) do not accumulate.
+    #[allow(dead_code, reason = "assertion helper for the parser tests")]
     pub fn pending_bytes(&self) -> usize {
         self.buffer.len()
     }
