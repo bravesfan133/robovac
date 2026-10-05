@@ -425,6 +425,7 @@ impl Valetudo {
 
     /// Whether the robot is capturing obstacle images at all. Off by default,
     /// since it is a firmware setting rather than something Valetudo decides.
+    #[allow(dead_code, reason = "surfaced in the UI on request")]
     pub async fn obstacle_images_enabled(&self) -> Result<bool, ApiError> {
         #[derive(Deserialize)]
         struct Enabled {

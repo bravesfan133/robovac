@@ -29,7 +29,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::bytecache::ByteCache;
-use crate::cache::{broadcast_payload, Obstacle, RobotCache};
+use crate::cache::{broadcast_payload, RobotCache};
 use crate::config::Config;
 use crate::valetudo::Valetudo;
 use askama::Template as _;
@@ -516,37 +516,6 @@ fn validate_obstacle_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-mod obstacle_id_tests {
-    use super::validate_obstacle_id;
-
-    #[test]
-    fn accepts_realistic_ids() {
-        for id in ["obj-a1", "1647867893", "AABBCCDD", "img_1", "a.b"] {
-            assert!(validate_obstacle_id(id).is_ok(), "{id} should be valid");
-        }
-    }
-
-    #[test]
-    fn rejects_traversal_and_junk() {
-        for id in [
-            "",
-            "../etc/passwd",
-            "a/b",
-            "a b",
-            "a%2Fb",
-            "a?b=1",
-            "a#b",
-            "a\\b",
-        ] {
-            assert!(
-                validate_obstacle_id(id).is_err(),
-                "{id:?} should be rejected"
-            );
-        }
-        assert!(validate_obstacle_id(&"x".repeat(129)).is_err());
-    }
-}
 
 async fn camera_stream(State(state): State<AppState>) -> Response {
     let resp = match state
@@ -763,4 +732,36 @@ async fn auth_layer(
         )],
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod obstacle_id_tests {
+    use super::validate_obstacle_id;
+
+    #[test]
+    fn accepts_realistic_ids() {
+        for id in ["obj-a1", "1647867893", "AABBCCDD", "img_1", "a.b"] {
+            assert!(validate_obstacle_id(id).is_ok(), "{id} should be valid");
+        }
+    }
+
+    #[test]
+    fn rejects_traversal_and_junk() {
+        for id in [
+            "",
+            "../etc/passwd",
+            "a/b",
+            "a b",
+            "a%2Fb",
+            "a?b=1",
+            "a#b",
+            "a\\b",
+        ] {
+            assert!(
+                validate_obstacle_id(id).is_err(),
+                "{id:?} should be rejected"
+            );
+        }
+        assert!(validate_obstacle_id(&"x".repeat(129)).is_err());
+    }
 }

@@ -75,10 +75,12 @@ impl ByteCache {
         });
     }
 
+    #[allow(dead_code, reason = "used by the cache tests")]
     pub fn len(&self) -> usize {
         self.lock().len()
     }
 
+    #[allow(dead_code, reason = "used by the cache tests")]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
