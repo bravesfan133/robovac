@@ -5,6 +5,7 @@ mod sse;
 mod upstream;
 mod valetudo;
 mod web;
+mod zone;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -96,6 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/control/{action}", post(control))
         .route("/api/fan-speed", post(set_fan_speed))
         .route("/api/clean-segments", post(clean_segments))
+        .route("/api/clean-zones", post(clean_zones))
         .route("/map.svg", get(map_svg))
         .route("/api/camera/stream", get(camera_stream))
         .route("/api/camera/properties", get(camera_properties))
@@ -339,6 +341,41 @@ async fn camera_properties(State(state): State<AppState>) -> Response {
 
 /// Proxy the robot's MPEG-TS stream so the browser only needs to reach this
 /// service, not the vacuum directly.
+async fn clean_zones(
+    State(state): State<AppState>,
+    Json(body): Json<crate::zone::ZoneRequest>,
+) -> Response {
+    let Some((_min_x, _min_y, pixel_size, max_x)) = state.cache.map_extent() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "no map yet, so zones cannot be placed"
+            })),
+        )
+            .into_response();
+    };
+
+    // Drawn pixels are relative to the map's own origin, so only the mapped
+    // width is needed here; `pixel_size` converts them to map units.
+    let extent = (0.0, 0.0, pixel_size, max_x);
+    let zones = match body.to_zones(pixel_size, Some(extent)) {
+        Ok(zones) => zones,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err})),
+            )
+                .into_response()
+        }
+    };
+
+    let payload = crate::zone::ZoneCleanBody::new(&zones);
+    match state.valetudo.clean_zones(&payload).await {
+        Ok(()) => Json(serde_json::json!({"ok": true, "zones": zones.len()})).into_response(),
+        Err(err) => error_response(err),
+    }
+}
+
 async fn camera_stream(State(state): State<AppState>) -> Response {
     let resp = match state
         .valetudo

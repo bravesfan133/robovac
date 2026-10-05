@@ -169,6 +169,10 @@ function mapChanged() {
   return true;
 }
 
+// Recorded zone requests, so tests can assert the exact wire format sent to
+// Valetudo rather than trusting that the right thing happened.
+const zoneRequests = [];
+
 const json = (res, body, code = 200) => {
   const payload = JSON.stringify(body);
   res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(payload) });
@@ -259,6 +263,35 @@ createServer((req, res) => {
       robot.status = "cleaning";
       json(res, {});
     });
+    return;
+  }
+  if (path === "/api/v2/robot/capabilities/ZoneCleaningCapability" && req.method === "PUT") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      try {
+        zoneRequests.push(JSON.parse(body || "{}"));
+      } catch {
+        json(res, { error: "invalid json" }, 400);
+        return;
+      }
+      robot.status = "cleaning";
+      json(res, {});
+    });
+    return;
+  }
+  // Test hook: the last zone request, for asserting the wire format.
+  if (path === "/test/zones") {
+    json(res, zoneRequests);
+    return;
+  }
+  // Test hook: drop the map, so the "cannot place zones without a map" path can
+  // be exercised.
+  if (path === "/test/unmap") {
+    map.layers = [];
+    map.entities = [];
+    mapChanged();
+    json(res, { mapped: false });
     return;
   }
   if (path === "/api/v2/robot/capabilities/BasicControlCapability") {

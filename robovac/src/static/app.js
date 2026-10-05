@@ -56,8 +56,11 @@ async function loadMap() {
       throw new Error('unparsable SVG');
     }
 
+    const ov = $('#zone-overlay');
     frame.replaceChildren(document.importNode(parsed, true));
+    if (ov) frame.append(ov);
     wireMap(frame);
+    renderZones();
   } catch (err) {
     // Leave the <noscript> image in place rather than showing an empty box.
     frame.dataset.failed = '1';
@@ -215,6 +218,147 @@ function connect() {
   });
 }
 
+// --- zone drawing -----------------------------------------------------------
+//
+// Rectangles are kept in *map pixel* coordinates, the same space the SVG's
+// viewBox uses. That means a drawn rectangle needs no scaling on the way out
+// and the server can convert to map units with the pixel size it already knows.
+
+const MAX_ZONES = 4;
+const zones = [];
+let drawMode = false;
+let drawing = null;
+
+function overlay() {
+  return $('#zone-overlay');
+}
+
+function setDrawMode(on) {
+  drawMode = on;
+  const ov = overlay();
+  const btn = $('#zone-draw');
+  if (!ov || !btn) return;
+  ov.toggleAttribute('data-active', on);
+  btn.setAttribute('aria-pressed', String(on));
+  btn.textContent = on ? 'Drawing… click to stop' : 'Draw a zone';
+  const help = $('[data-role="zone-help"]');
+  if (help) {
+    help.textContent = on
+      ? 'Drag on the map to draw. Drag again for another zone.'
+      : `Up to ${MAX_ZONES} zones per run, which is this robot's limit.`;
+  }
+  // The overlay swallows pointer events, so stop the map from also toggling
+  // rooms while a zone is being drawn.
+  ov.style.pointerEvents = on ? 'auto' : 'none';
+}
+
+function renderZones() {
+  const ov = overlay();
+  if (!ov) return;
+  ov.replaceChildren(
+    ...zones.map((z, i) => {
+      const el = document.createElement('div');
+      el.className = 'zone-shape';
+      el.style.left = `${Math.min(z.x0, z.x1)}px`;
+      el.style.top = `${Math.min(z.y0, z.y1)}px`;
+      el.style.width = `${Math.abs(z.x1 - z.x0)}px`;
+      el.style.height = `${Math.abs(z.y1 - z.y0)}px`;
+
+      const tag = document.createElement('span');
+      tag.className = 'zone-index';
+      tag.textContent = String(i + 1);
+      el.append(tag);
+      return el;
+    }),
+  );
+
+  const count = $('[data-role="zone-count"]');
+  if (count) count.textContent = String(zones.length);
+  const clean = $('#zone-clean');
+  if (clean) clean.disabled = zones.length === 0;
+}
+
+/** Map a pointer event to the SVG's own coordinate system. */
+function toSvgPoint(evt) {
+  const svg = $('#map-frame svg');
+  const frame = $('#map-frame');
+  if (!svg || !frame) return null;
+
+  const box = svg.getBoundingClientRect();
+  const px = Number(svg.dataset.pixelSize) || 1;
+  const vx = Number(svg.dataset.viewX) || 0;
+  const vy = Number(svg.dataset.viewY) || 0;
+  // preserveAspectRatio="xMidYMid meet" letterboxes, so account for the offset
+  // and the scale actually applied to the drawn content.
+  const vb = svg.viewBox.baseVal;
+  if (!vb || vb.width === 0) return null;
+
+  const scale = Math.min(box.width / vb.width, box.height / vb.height);
+  const offsetX = (box.width - vb.width * scale) / 2;
+  const offsetY = (box.height - vb.height * scale) / 2;
+
+  return {
+    x: (evt.clientX - box.left - offsetX) / scale + vx,
+    y: (evt.clientY - box.top - offsetY) / scale + vy,
+  };
+}
+
+function wireZoneDrawing() {
+  const ov = overlay();
+  if (!ov) return;
+
+  ov.addEventListener('pointerdown', (evt) => {
+    if (!drawMode || zones.length >= MAX_ZONES) return;
+    const p = toSvgPoint(evt);
+    if (!p) return;
+    ov.setPointerCapture(evt.pointerId);
+    drawing = p;
+    evt.preventDefault();
+  });
+
+  ov.addEventListener('pointermove', (evt) => {
+    if (!drawing) return;
+    const p = toSvgPoint(evt);
+    if (!p) return;
+    // Preview by mutating the in-progress rectangle.
+    zones.push({ x0: drawing.x, y0: drawing.y, x1: p.x, y1: p.y });
+    renderZones();
+  });
+
+  const finish = (evt) => {
+    if (!drawing) return;
+    const p = toSvgPoint(evt) ?? drawing;
+    const last = zones.pop();
+    drawing = null;
+    if (last) {
+      const w = Math.abs(p.x - last.x0);
+      const h = Math.abs(p.y - last.y0);
+      // Ignore accidental clicks; the server rejects sub-pixel zones anyway.
+      if (w > 1 && h > 1) {
+        zones.push({ x0: last.x0, y0: last.y0, x1: p.x, y1: p.y });
+      }
+      renderZones();
+    }
+  };
+  ov.addEventListener('pointerup', finish);
+  ov.addEventListener('pointercancel', finish);
+
+  $('#zone-draw')?.addEventListener('click', () => setDrawMode(!drawMode));
+  $('#zone-clear')?.addEventListener('click', () => {
+    zones.length = 0;
+    renderZones();
+  });
+  $('#zone-clean')?.addEventListener('click', async () => {
+    if (zones.length === 0) return;
+    await withButton($('#zone-clean'), () =>
+      post('/api/clean-zones', {
+        zones: zones.map((z) => [z.x0, z.y0, z.x1, z.y1]),
+      }),
+    );
+    setDrawMode(false);
+  });
+}
+
 // --- camera ------------------------------------------------------------------
 
 const cameraBtn = $('#camera-toggle');
@@ -245,5 +389,7 @@ if (cameraBtn) {
 
 // Server-rendered state is already in the DOM, so the first paint needs no JS.
 syncSelection();
+wireZoneDrawing();
+renderZones();
 loadMap();
 connect();

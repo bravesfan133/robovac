@@ -145,3 +145,34 @@ li .label { flex: 1; }
 progress { width: 40%; }
 
 video { width: 100%; border-radius: 8px; background: #000; }
+/* --- zones -----------------------------------------------------------------
+   The drawing overlay sits on top of the map and captures pointer events only
+   while drawing, so room selection keeps working the rest of the time. */
+.map-wrap { position: relative; }
+
+.zone-overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  cursor: crosshair;
+  touch-action: none;
+}
+.zone-overlay[data-active] { display: block; }
+
+.zone-shape {
+  position: absolute;
+  border: 2px solid #3caa6e;
+  background: rgba(60, 170, 110, 0.18);
+  pointer-events: none;
+}
+.zone-shape .zone-index {
+  position: absolute;
+  top: -1.4em;
+  left: 0;
+  font-size: 11px;
+  padding: 0 0.3em;
+  border-radius: 3px;
+  background: #3caa6e;
+  color: #10240f;
+  font-weight: 700;
+}

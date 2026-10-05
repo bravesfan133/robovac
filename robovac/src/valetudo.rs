@@ -409,6 +409,20 @@ impl Valetudo {
             .map(Some)
     }
 
+    /// Clean a set of zones.
+    ///
+    /// The body is pre-rendered by the caller because the corner order and the
+    /// `points` wrapper are Valetudo's, not ours.
+    pub async fn clean_zones(&self, body: &crate::zone::ZoneCleanBody<'_>) -> Result<(), ApiError> {
+        let resp = self
+            .request_put("/capabilities/ZoneCleaningCapability")
+            .json(body)
+            .send()
+            .await
+            .map_err(transport)?;
+        check_empty(resp).await
+    }
+
     /// Proxy a GET to an arbitrary Valetudo path, preserving auth. Used for the
     /// camera stream, which is binary and therefore cannot go through the typed
     /// helpers above.

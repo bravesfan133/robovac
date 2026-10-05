@@ -91,6 +91,31 @@ impl MapData {
             .sum()
     }
 
+    /// Mapped extent as `(min_x, min_y, max_x)` in pixels, or `None` when
+    /// there is nothing mapped yet.
+    ///
+    /// Derived from the layers rather than the reported `size`, which is zero on
+    /// some models straight after a map reset.
+    pub fn extent(&self) -> Option<(f64, f64, f64)> {
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+
+        for layer in &self.layers {
+            for (x, y) in layer.pixels() {
+                min_x = min_x.min(x as f64);
+                min_y = min_y.min(y as f64);
+                max_x = max_x.max(x as f64 + 1.0);
+            }
+        }
+
+        if min_x.is_finite() && min_y.is_finite() && max_x.is_finite() {
+            Some((min_x, min_y, max_x))
+        } else {
+            None
+        }
+    }
+
     pub fn entity_count(&self) -> usize {
         self.entities.len()
     }
@@ -538,6 +563,25 @@ mod tests {
         let svg = render_svg(&map, &[]);
         assert!(svg.contains("data-pixel-size=\"5.0000\""));
         assert!(svg.contains("data-view-x="));
+    }
+
+    #[test]
+    fn extent_is_derived_from_the_layers() {
+        let extent = fixture().extent().expect("fixture has pixels");
+        // max_x comes from the furthest layer, not just the floor: the fixture
+        // also has a segment at x=10..12 and a wall at x=4, so it reaches 13.
+        // The bound is exclusive, hence 13 rather than 12.
+        assert_eq!(extent, (0.0, 0.0, 13.0));
+    }
+
+    #[test]
+    fn extent_is_none_for_an_empty_map() {
+        let empty = MapData {
+            pixel_size: 1.0,
+            layers: vec![],
+            entities: vec![],
+        };
+        assert_eq!(empty.extent(), None);
     }
 
     #[test]

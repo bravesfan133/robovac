@@ -227,15 +227,15 @@ impl RobotCache {
         self.read().map.clone()
     }
 
-    /// Scale factor and viewport, for mapping pixel coordinates back to map
-    /// coordinates when the client draws a zone.
-    #[allow(dead_code, reason = "used by zone drawing")]
-    pub fn map_scale(&self) -> Option<(f64, f64)> {
+    /// Pixel scale and mapped extent, for turning a drawn rectangle back into
+    /// map coordinates: `(min_x, min_y, pixel_size, max_x)`.
+    pub fn map_extent(&self) -> Option<(f64, f64, f64, f64)> {
         let inner = self.read();
-        inner
-            .map
-            .as_ref()
-            .map(|m| (m.pixel_size, 1.0 / m.pixel_size.max(f64::EPSILON)))
+        let map = inner.map.as_ref()?;
+        // `extent` yields pixels; the caller needs pixels for the inverse of the
+        // SVG transform and units for the request body.
+        map.extent()
+            .map(|(min_x, min_y, max_x)| (min_x, min_y, map.pixel_size, max_x))
     }
 
     /// Monotonic stamp for the rendered map, so clients can skip re-rendering

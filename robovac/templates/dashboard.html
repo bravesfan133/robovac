@@ -35,7 +35,11 @@
 
 <main>
   <section class="map-panel">
-    <div class="map-frame" id="map-frame" data-map-version="-1">
+    <div class="map-wrap">
+      <div class="map-frame" id="map-frame" data-map-version="-1">
+        <div class="zone-overlay" id="zone-overlay"></div>
+      </div>
+    </div>
       <noscript>
         <img src="/map.svg?segments={{ selected_segments.join(",") }}" alt="Floor plan" class="map">
       </noscript>
@@ -136,6 +140,19 @@
     </ul>
   </section>
   {% endif %}
+
+  <section class="zones">
+    <h2>Zones</h2>
+    <div class="row">
+      <button type="button" id="zone-draw" aria-pressed="false">Draw a zone</button>
+      <button type="button" class="ghost" id="zone-clear">Clear zones</button>
+      <button type="button" id="zone-clean" disabled>Clean zones (<span data-role="zone-count">0</span>/4)</button>
+    </div>
+    <p class="muted small" data-role="zone-help">
+      Drag on the map to mark an area. Up to 4 zones per run, which is this
+      robot's limit.
+    </p>
+  </section>
 
   <section class="camera">
     <h2>Camera</h2>
