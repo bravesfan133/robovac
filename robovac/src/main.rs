@@ -1,3 +1,4 @@
+mod bytecache;
 mod cache;
 mod config;
 mod map;
@@ -27,7 +28,8 @@ use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::cache::{broadcast_payload, RobotCache};
+use crate::bytecache::ByteCache;
+use crate::cache::{broadcast_payload, Obstacle, RobotCache};
 use crate::config::Config;
 use crate::valetudo::Valetudo;
 use askama::Template as _;
@@ -40,6 +42,9 @@ struct AppState {
     cache: Arc<RobotCache>,
     /// Broadcasts state updates to connected browsers.
     updates: broadcast::Sender<serde_json::Value>,
+    /// Obstacle photos, bounded and short-lived so re-viewing one does not
+    /// hammer Valetudo's rate limiter.
+    obstacle_cache: Arc<ByteCache>,
 }
 
 #[tokio::main]
@@ -69,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             valetudo: valetudo.clone(),
             cache: cache.clone(),
             updates: updates.clone(),
+            obstacle_cache: Arc::new(ByteCache::new(1024, Duration::from_secs(60))),
         };
         tokio::spawn(poll_loop(state.clone(), cfg.poll_interval_ms));
 
@@ -98,6 +104,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/fan-speed", post(set_fan_speed))
         .route("/api/clean-segments", post(clean_segments))
         .route("/api/clean-zones", post(clean_zones))
+        .route("/api/obstacles", get(api_obstacles))
+        .route("/api/obstacles/enabled", post(set_obstacle_images))
+        .route("/api/obstacles/image", get(obstacle_image))
         .route("/map.svg", get(map_svg))
         .route("/api/camera/stream", get(camera_stream))
         .route("/api/camera/properties", get(camera_properties))
@@ -114,6 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             valetudo,
             cache,
             updates,
+            // 16 MB is plenty for a few dozen camera frames and keeps the
+            // resident footprint trivial next to the robot itself.
+            obstacle_cache: Arc::new(ByteCache::new(16 * 1024 * 1024, Duration::from_secs(300))),
         });
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -373,6 +385,166 @@ async fn clean_zones(
     match state.valetudo.clean_zones(&payload).await {
         Ok(()) => Json(serde_json::json!({"ok": true, "zones": zones.len()})).into_response(),
         Err(err) => error_response(err),
+    }
+}
+
+async fn api_obstacles(State(state): State<AppState>) -> Response {
+    let snap = state.cache.snapshot();
+    Json(serde_json::json!({
+        "obstacles": snap.obstacles,
+        "count": snap.obstacles.len(),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct ObstacleToggle {
+    enabled: bool,
+}
+
+/// Turn the robot's obstacle capture on or off. This is a firmware setting that
+/// persists across reboots, so it is not something to flip silently.
+async fn set_obstacle_images(
+    State(state): State<AppState>,
+    Json(body): Json<ObstacleToggle>,
+) -> Response {
+    match state
+        .valetudo
+        .set_obstacle_images_enabled(body.enabled)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"ok": true, "enabled": body.enabled})).into_response(),
+        Err(err) => error_response(err),
+    }
+}
+
+/// Proxy one obstacle photo, caching the bytes.
+///
+/// Loaded on demand rather than eagerly: Valetudo rate-limits this endpoint to
+/// three requests a second, and a page that fetched every obstacle at once would
+/// throttle itself.
+async fn obstacle_image(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ObstacleImageQuery>,
+) -> Response {
+    let id = q.id.unwrap_or_default();
+    if let Err(err) = validate_obstacle_id(&id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err})),
+        )
+            .into_response();
+    }
+
+    if let Some((bytes, content_type)) = state.obstacle_cache.get(&id) {
+        return (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_str(&content_type)
+                        .unwrap_or(HeaderValue::from_static("image/jpeg")),
+                ),
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("private, max-age=120"),
+                ),
+            ],
+            bytes,
+        )
+            .into_response();
+    }
+
+    let resp = match state.valetudo.obstacle_image(&id).await {
+        Ok(r) => r,
+        Err(err) => return error_response(err),
+    };
+
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b.to_vec(),
+        Err(err) => return error_response(valetudo::ApiError::Transport(err.to_string())),
+    };
+
+    state.obstacle_cache.put(&id, bytes.clone(), &content_type);
+
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(&content_type)
+                    .unwrap_or(HeaderValue::from_static("image/jpeg")),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=120"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct ObstacleImageQuery {
+    id: Option<String>,
+}
+
+/// Obstacle ids come from the robot, so they are treated as untrusted.
+///
+/// Path traversal is handled by percent-encoding before the request leaves, but
+/// the id is also used as a cache key and is worth bounding regardless. Real ids
+/// are hex or decimal digits, sometimes with separators, so those are allowed.
+fn validate_obstacle_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("no obstacle id given".into());
+    }
+    if id.len() > 128 {
+        return Err("obstacle id is too long".into());
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err("obstacle id contains unexpected characters".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod obstacle_id_tests {
+    use super::validate_obstacle_id;
+
+    #[test]
+    fn accepts_realistic_ids() {
+        for id in ["obj-a1", "1647867893", "AABBCCDD", "img_1", "a.b"] {
+            assert!(validate_obstacle_id(id).is_ok(), "{id} should be valid");
+        }
+    }
+
+    #[test]
+    fn rejects_traversal_and_junk() {
+        for id in [
+            "",
+            "../etc/passwd",
+            "a/b",
+            "a b",
+            "a%2Fb",
+            "a?b=1",
+            "a#b",
+            "a\\b",
+        ] {
+            assert!(
+                validate_obstacle_id(id).is_err(),
+                "{id:?} should be rejected"
+            );
+        }
+        assert!(validate_obstacle_id(&"x".repeat(129)).is_err());
     }
 }
 

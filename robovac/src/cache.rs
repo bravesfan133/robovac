@@ -8,6 +8,15 @@ use crate::valetudo::{
     Consumable, DuststreamProperties, MapSegment, RobotInfo, RobotState, Summary,
 };
 
+/// An obstacle the robot reported, with enough detail to place it on the map.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Obstacle {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub angle: f64,
+}
+
 /// Everything the dashboard renders, cached.
 ///
 /// Valetudo distinguishes two kinds of read, and the difference matters a lot on
@@ -43,6 +52,8 @@ struct Inner {
     map_version: u64,
     /// Raw map, kept for callers that need geometry rather than a rendered SVG.
     map: Option<MapData>,
+    /// Obstacle markers from the current map: `(id, x, y, angle)`.
+    obstacles: Vec<Obstacle>,
     last_ok: Option<Instant>,
     last_error: Option<String>,
     /// True once a poll has ever succeeded, so "never worked" and "broke" are
@@ -63,6 +74,7 @@ impl Default for RobotCache {
                 rendered: None,
                 map_version: 0,
                 map: None,
+                obstacles: Vec::new(),
                 last_ok: None,
                 last_error: None,
                 ever_ok: false,
@@ -84,6 +96,7 @@ pub struct Snapshot {
     pub last_ok: Option<Instant>,
     pub last_error: Option<String>,
     pub ever_ok: bool,
+    pub obstacles: Vec<Obstacle>,
     /// False before the first successful poll, so handlers can distinguish
     /// "still warming up" from "the robot is gone".
     pub warm: bool,
@@ -93,6 +106,24 @@ pub struct Snapshot {
 /// share exactly one definition of "did this change".
 impl Inner {
     fn absorb(&mut self, map: MapData) {
+        // Obstacle markers are cheap to collect while the map is in hand, and
+        // the panel needs position and heading to draw a compass needle.
+        self.obstacles = map
+            .entities
+            .iter()
+            .filter(|e| e.entity_type == "obstacle")
+            .filter_map(|e| {
+                let id = e.image_id()?.to_string();
+                let (x, y) = (e.points.first().copied()?, *e.points.get(1)?);
+                Some(Obstacle {
+                    id,
+                    x,
+                    y,
+                    angle: e.angle(),
+                })
+            })
+            .collect();
+
         // Conservative proxy: the robot rewrites the map wholesale as it
         // explores, so these totals move whenever anything meaningful did.
         let changed = match self.map.as_ref() {
@@ -132,6 +163,7 @@ impl RobotCache {
             last_ok: inner.last_ok,
             last_error: inner.last_error.clone(),
             ever_ok: inner.ever_ok,
+            obstacles: inner.obstacles.clone(),
             warm: inner.last_ok.is_some(),
         }
     }

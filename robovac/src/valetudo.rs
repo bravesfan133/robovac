@@ -423,6 +423,59 @@ impl Valetudo {
         check_empty(resp).await
     }
 
+    /// Whether the robot is capturing obstacle images at all. Off by default,
+    /// since it is a firmware setting rather than something Valetudo decides.
+    pub async fn obstacle_images_enabled(&self) -> Result<bool, ApiError> {
+        #[derive(Deserialize)]
+        struct Enabled {
+            enabled: bool,
+        }
+        let resp = self
+            .request("/capabilities/ObstacleImagesCapability")
+            .send()
+            .await
+            .map_err(transport)?;
+        Self::send_json::<Enabled>(resp).await.map(|e| e.enabled)
+    }
+
+    pub async fn set_obstacle_images_enabled(&self, enable: bool) -> Result<(), ApiError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            action: &'a str,
+        }
+        let action = if enable { "enable" } else { "disable" };
+        let resp = self
+            .request_put("/capabilities/ObstacleImagesCapability")
+            .json(&Body { action })
+            .send()
+            .await
+            .map_err(transport)?;
+        check_empty(resp).await
+    }
+
+    /// Stream one obstacle photo.
+    ///
+    /// Valetudo rate-limits this hard (3/s, 10 per 5s, 30 per 20s) because each
+    /// fetch asks the firmware whether the feature is even enabled. Callers must
+    /// therefore load on demand and cache, never eagerly.
+    pub async fn obstacle_image(&self, id: &str) -> Result<reqwest::Response, ApiError> {
+        let encoded = percent_encode(id);
+        let resp = self
+            .request(&format!(
+                "/capabilities/ObstacleImagesCapability/img/{encoded}"
+            ))
+            .send()
+            .await
+            .map_err(transport)?;
+        if !resp.status().is_success() {
+            return Err(ApiError::Status {
+                status: resp.status().as_u16(),
+                detail: None,
+            });
+        }
+        Ok(resp)
+    }
+
     /// Proxy a GET to an arbitrary Valetudo path, preserving auth. Used for the
     /// camera stream, which is binary and therefore cannot go through the typed
     /// helpers above.
@@ -440,6 +493,25 @@ pub struct DuststreamProperties {
     pub height: u32,
     #[serde(rename = "duststreamerInstalled", default)]
     pub duststreamer_installed: bool,
+}
+
+/// Percent-encode a path segment.
+///
+/// The previous hand-rolled dependency was removed when the read paths became
+/// cache-backed, and the only value that still needs encoding is an obstacle id,
+/// which comes from the robot and may contain characters that would otherwise
+/// change the path.
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn transport(e: reqwest::Error) -> ApiError {
@@ -491,6 +563,16 @@ mod tests {
         let state: RobotState = serde_json::from_str("{}").expect("empty state should parse");
         assert!(state.attributes.is_empty());
         assert!(Summary::from_state(&state).status.is_none());
+    }
+
+    #[test]
+    fn path_segments_are_encoded() {
+        assert_eq!(percent_encode("abc123"), "abc123");
+        assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
+        // A slash in an id would otherwise traverse the path.
+        assert_eq!(percent_encode("a/b"), "a%2Fb");
+        assert_eq!(percent_encode(".."), "..");
+        assert_eq!(percent_encode("a b"), "a%20b");
     }
 
     #[test]

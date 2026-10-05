@@ -76,8 +76,20 @@ const map = {
     { type: "robot_position", points: [2, 1], metaData: { angle: 90 } },
     { type: "path", points: [2, 1, 3, 2, 4, 1], metaData: {} },
     { type: "no_go_area", points: [1, 2, 2, 2, 2, 3, 1, 3], metaData: {} },
+    { type: "obstacle", points: [3, 1], metaData: { id: "obj-a1", angle: 90 } },
+    { type: "obstacle", points: [1, 2], metaData: { id: "obj-b2", angle: 215 } },
   ],
 };
+
+// A 1x1 JPEG-ish payload is enough to prove the proxy and cache work; the
+// browser only ever decodes it, and a real robot returns real frames.
+const FAKE_JPEG = Buffer.from([
+  0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+  0x00, 0x01, 0x00, 0x00, 0xff, 0xd9,
+]);
+
+let obstacleCapture = false;
+let imageFetches = 0;
 
 const consumables = [
   { __class: "ValetudoConsumable", metaData: {}, type: "brush", subType: "main", remaining: { value: 182000, unit: "minutes" } },
@@ -263,6 +275,49 @@ createServer((req, res) => {
       robot.status = "cleaning";
       json(res, {});
     });
+    return;
+  }
+  if (path === "/api/v2/robot/capabilities/ObstacleImagesCapability" && req.method === "GET") {
+    return json(res, { enabled: obstacleCapture });
+  }
+  if (path === "/api/v2/robot/capabilities/ObstacleImagesCapability" && req.method === "PUT") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      try {
+        const { action } = JSON.parse(body || "{}");
+        if (action !== "enable" && action !== "disable") {
+          json(res, { error: "Invalid action" }, 400);
+          return;
+        }
+        obstacleCapture = action === "enable";
+        console.log(`  obstacle capture ${obstacleCapture ? "enabled" : "disabled"}`);
+        res.writeHead(200);
+        res.end();
+      } catch {
+        json(res, { error: "invalid json" }, 400);
+      }
+    });
+    return;
+  }
+  if (path.startsWith("/api/v2/robot/capabilities/ObstacleImagesCapability/img/")) {
+    imageFetches += 1;
+    const id = decodeURIComponent(path.split("/img/")[1] ?? "");
+    if (!obstacleCapture) {
+      json(res, { error: "obstacle images are disabled on the robot" }, 500);
+      return;
+    }
+    if (!["obj-a1", "obj-b2"].includes(id)) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "content-type": "image/jpeg", "content-length": FAKE_JPEG.length });
+    res.end(FAKE_JPEG);
+    return;
+  }
+  if (path === "/test/obstacle-stats") {
+    json(res, { enabled: obstacleCapture, imageFetches });
     return;
   }
   if (path === "/api/v2/robot/capabilities/ZoneCleaningCapability" && req.method === "PUT") {

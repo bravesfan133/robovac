@@ -176,3 +176,23 @@ video { width: 100%; border-radius: 8px; background: #000; }
   color: #10240f;
   font-weight: 700;
 }
+
+.obstacle-list { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+.obstacle-item {
+  width: 7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  align-items: center;
+}
+.obstacle-item img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #101216;
+  border: 1px solid var(--line);
+  cursor: zoom-in;
+}
+.obstacle-item .obstacle-meta { font-size: 0.7rem; color: var(--muted); }
+.obstacle-empty { color: var(--muted); font-size: 0.9rem; }

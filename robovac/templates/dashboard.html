@@ -154,6 +154,22 @@
     </p>
   </section>
 
+  <section class="obstacles" data-role="obstacles-section" hidden>
+    <h2>Obstacles</h2>
+    <div class="row">
+      <label class="chip">
+        <input type="checkbox" id="obstacle-capture">
+        <span>Capture obstacle photos</span>
+      </label>
+      <span class="muted small" data-role="obstacle-count"></span>
+    </div>
+    <p class="muted small">
+      Off by default on the robot. Photos load only when you ask for one, which
+      keeps inside the rate limit Valetudo puts on that endpoint.
+    </p>
+    <ul class="obstacle-list" data-role="obstacle-list"></ul>
+  </section>
+
   <section class="camera">
     <h2>Camera</h2>
     {% if let Some(cam) = camera %}

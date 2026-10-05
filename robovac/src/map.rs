@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 /// Subset of Valetudo's `RawMapData` that we need in order to draw a map.
@@ -43,6 +45,25 @@ pub struct MapEntity {
     pub entity_type: String,
     #[serde(default)]
     pub points: Vec<f64>,
+    /// Obstacles carry `id` (matching Valetudo's image endpoint) and `angle`;
+    /// other entity types carry a label instead.
+    #[serde(default, rename = "metaData")]
+    pub meta_data: BTreeMap<String, serde_json::Value>,
+}
+
+impl MapEntity {
+    /// The obstacle image id, when this is an obstacle that has one.
+    pub fn image_id(&self) -> Option<&str> {
+        self.meta_data.get("id").and_then(|v| v.as_str())
+    }
+
+    /// Heading in degrees, 0 being north.
+    pub fn angle(&self) -> f64 {
+        self.meta_data
+            .get("angle")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+    }
 }
 
 impl MapLayer {

@@ -359,6 +359,81 @@ function wireZoneDrawing() {
   });
 }
 
+// --- obstacles ---------------------------------------------------------------
+//
+// Valetudo rate-limits obstacle photos hard, so the list shows markers
+// immediately and photos load strictly on demand, one at a time.
+
+async function loadObstacles() {
+  const section = $('[data-role="obstacles-section"]');
+  if (!section) return;
+
+  try {
+    const res = await fetch('/api/obstacles');
+    if (res.status === 404) return; // robot has no camera
+    const data = await res.json();
+    renderObstacles(data.obstacles || []);
+  } catch {
+    section.hidden = true;
+  }
+}
+
+function renderObstacles(obstacles) {
+  const section = $('[data-role="obstacles-section"]');
+  const list = $('[data-role="obstacle-list"]');
+  const count = $('[data-role="obstacle-count"]');
+  if (!section || !list) return;
+
+  section.hidden = false;
+  if (count) count.textContent = `${obstacles.length} reported`;
+
+  if (obstacles.length === 0) {
+    list.replaceChildren();
+    const empty = document.createElement('p');
+    empty.className = 'obstacle-empty';
+    empty.textContent = 'Nothing reported yet.';
+    list.append(empty);
+    return;
+  }
+
+  list.replaceChildren(
+    ...obstacles.map((o) => {
+      const item = document.createElement('li');
+      item.className = 'obstacle-item';
+
+      const img = document.createElement('img');
+      img.alt = `Obstacle ${o.id}`;
+      img.loading = 'lazy';
+      img.addEventListener('click', () => {
+        img.src = `/api/obstacles/image?id=${encodeURIComponent(o.id)}`;
+        img.style.cursor = 'default';
+      });
+
+      const meta = document.createElement('span');
+      meta.className = 'obstacle-meta';
+      meta.textContent = `${Math.round(o.x)}, ${Math.round(o.y)}`;
+
+      item.append(img, meta);
+      return item;
+    }),
+  );
+}
+
+const obstacleToggle = $('#obstacle-capture');
+if (obstacleToggle) {
+  obstacleToggle.addEventListener('change', async () => {
+    obstacleToggle.disabled = true;
+    try {
+      await post('/api/obstacles/enabled', { enabled: obstacleToggle.checked });
+    } catch (err) {
+      alert(`Failed: ${err.message}`);
+      obstacleToggle.checked = !obstacleToggle.checked;
+    } finally {
+      obstacleToggle.disabled = false;
+    }
+  });
+}
+
 // --- camera ------------------------------------------------------------------
 
 const cameraBtn = $('#camera-toggle');
@@ -391,5 +466,6 @@ if (cameraBtn) {
 syncSelection();
 wireZoneDrawing();
 renderZones();
+loadObstacles();
 loadMap();
 connect();
