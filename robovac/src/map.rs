@@ -60,6 +60,39 @@ impl MapLayer {
     }
 }
 
+impl MapData {
+    /// Cheap fingerprint used to decide whether a re-render is worth doing.
+    /// Deliberately not a hash of the contents: comparing totals catches every
+    /// real change (the robot rewrites the map as it explores) while costing
+    /// three integer additions instead of walking every pixel.
+    pub fn size_fingerprint(&self) -> (usize, usize, usize) {
+        (
+            self.pixel_size.to_bits() as usize,
+            self.layers.len(),
+            self.entities.len(),
+        )
+    }
+
+    /// Total pixel count across all layers, counted in whichever encoding
+    /// Valetudo chose to send.
+    pub fn pixel_total(&self) -> usize {
+        self.layers
+            .iter()
+            .map(|l| {
+                if !l.pixels.is_empty() {
+                    l.pixels.len() / 2
+                } else {
+                    l.compressed_pixels.iter().skip(2).step_by(3).sum::<i64>() as usize
+                }
+            })
+            .sum()
+    }
+
+    pub fn entity_count(&self) -> usize {
+        self.entities.len()
+    }
+}
+
 /// Render the map as a standalone SVG document.
 ///
 /// Rendering happens server-side so the browser needs no map library and no

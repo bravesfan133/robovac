@@ -18,36 +18,45 @@
       <span class="muted">robot info unavailable</span>
     {% endif %}
   </div>
-  <div class="link {% if connected %}ok{% else %}bad{% endif %}">
-    {% if connected %}online{% else %}offline{% endif %}
+  <div class="status {% if connected %}ok{% else if ever_connected %}bad{% else %}wait{% endif %}">
+    {% if connected %}
+      online{% if let Some(n) = contact_note %} · seen {{ n }}{% endif %}
+    {% else if ever_connected %}
+      unreachable
+    {% else %}
+      connecting
+    {% endif %}
   </div>
 </header>
 
 {% if let Some(e) = error %}
-<p class="banner">{{ e }}</p>
+<p class="banner" data-role="error">{{ e }}</p>
 {% endif %}
 
 <main>
   <section class="map-panel">
-    <img src="/map.svg" alt="Floor plan" class="map" id="map">
-    <p class="muted small">Map is rendered server-side from Valetudo's pixel data.</p>
+    <img src="/map.svg" alt="Floor plan" class="map" id="map" data-map-version="0">
+    <p class="muted small">
+      Rendered server-side from Valetudo's pixel data.
+      <span data-role="map-note"></span>
+    </p>
   </section>
 
   <section class="controls">
     <div class="status-row">
       <div class="stat">
         <span class="label">Status</span>
-        <span class="value">{{ summary.status.as_deref().unwrap_or("unknown") }}</span>
+        <span class="value" data-field="status">{{ summary.status.as_deref().unwrap_or("unknown") }}</span>
         <span class="muted small">{{ summary.status_flag.as_deref().unwrap_or("") }}</span>
       </div>
       <div class="stat">
         <span class="label">Battery</span>
-        <span class="value">{{ battery_display() }}</span>
+        <span class="value" data-field="battery">{{ battery_display() }}</span>
         <span class="muted small">{{ summary.battery_flag.as_deref().unwrap_or("") }}</span>
       </div>
       <div class="stat">
         <span class="label">Dock</span>
-        <span class="value">{{ summary.dock_status.as_deref().unwrap_or("unknown") }}</span>
+        <span class="value" data-field="dock">{{ summary.dock_status.as_deref().unwrap_or("unknown") }}</span>
         <span class="muted small">&nbsp;</span>
       </div>
     </div>
@@ -96,12 +105,12 @@
         </label>
       {% endfor %}
     </div>
-    <form method="get" action="/">
-      {% for seg in segments %}
-        {% if seg.selected %}<input type="hidden" name="segments" value="{{ seg.id }}">{% endif %}
-      {% endfor %}
-      <button type="submit">Clean selected</button>
-    </form>
+    <div class="row">
+      <button type="button" id="clean-selected" {% if selected_segments.is_empty() %}disabled{% endif %}>
+        Clean selected (<span data-role="selected-count">{{ selected_segments.len() }}</span>)
+      </button>
+      <button type="button" class="ghost" id="clear-selection">Clear</button>
+    </div>
   </section>
   {% endif %}
 

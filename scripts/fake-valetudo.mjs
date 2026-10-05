@@ -10,6 +10,30 @@ import { createServer } from "node:http";
 
 const port = Number(process.argv[2] ?? 8081);
 
+// Request log, so tests can assert how much robot traffic a page load causes.
+// The whole point of the server-side cache is that opening the dashboard must
+// not add /state polls on top of the background poller.
+const counts = new Map();
+const logRequests = process.env.FAKE_LOG !== "0";
+
+function tally(method, path) {
+  counts.set(path, (counts.get(path) ?? 0) + 1);
+  if (logRequests) console.log(`  ${method} ${path}`);
+}
+
+const tallyDump = () => {
+  if (!logRequests) return;
+  const total = [...counts.values()].reduce((a, b) => a + b, 0);
+  console.log(`  --- ${total} requests total ---`);
+  for (const [p, n] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${String(n).padStart(4)}  ${p}`);
+  }
+};
+
+process.on("SIGUSR2", tallyDump);
+process.on("SIGTERM", () => { tallyDump(); process.exit(0); });
+process.on("SIGINT", () => { tallyDump(); process.exit(0); });
+
 const robot = {
   status: "docked",
   battery: 100,
@@ -89,6 +113,7 @@ const json = (res, body, code = 200) => {
 createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
   const path = url.pathname;
+  tally(req.method, path);
 
   // Consume the body so keep-alive stays in sync.
   req.resume();

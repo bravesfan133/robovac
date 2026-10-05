@@ -24,9 +24,12 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let valetudo_url = env::var("VALETUDO_URL")
-            .map_err(|_| "VALETUDO_URL is required (e.g. http://192.0.2.46)".to_string())?;
-        let valetudo_url = valetudo_url.trim_end_matches('/').to_string();
+        let raw_url = env::var("VALETUDO_URL").map_err(|_| {
+            "VALETUDO_URL is required (e.g. http://valetudo-dreame_vacuum_r2492b.local)".to_string()
+        })?;
+        // Fail fast on a malformed address rather than surfacing a confusing
+        // connection error on every subsequent request.
+        let valetudo_url = validate_base_url(&raw_url)?;
 
         let bind = env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
@@ -93,6 +96,59 @@ impl Config {
     }
 }
 
+/// Reject an unusable `VALETUDO_URL` at startup rather than surfacing a
+/// confusing connection error on every subsequent request.
+///
+/// A missing scheme is the common mistake, so a bare `host` or `host:port` is
+/// accepted and assumed to be http. The normalised form is rebuilt from the
+/// parsed URL rather than by trimming slashes off the input: `http://` trimmed
+/// naively becomes `http:/`, which parses as a host called "http".
+fn validate_base_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+
+    if trimmed.is_empty() {
+        return Err("VALETUDO_URL is empty".to_string());
+    }
+
+    let candidate = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+
+    let parsed = url::Url::parse(&candidate)
+        .map_err(|e| format!("VALETUDO_URL {raw:?} is not valid: {e}"))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(format!(
+                "VALETUDO_URL must use http or https, got {other:?} in {raw:?}"
+            ))
+        }
+    }
+
+    let authority = parsed
+        .host_str()
+        .map(|h| match parsed.port() {
+            Some(port) => format!("{h}:{port}"),
+            None => h.to_string(),
+        })
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "VALETUDO_URL {raw:?} has no host. Use a hostname like \
+                 http://valetudo-dreame_vacuum_r2492b.local or an address like \
+                 http://192.168.0.46"
+            )
+        })?;
+
+    // Keep only scheme://authority. Any path in the input is dropped, because
+    // callers concatenate "/api/v2/robot/..." onto the result and a leftover
+    // path or trailing slash would produce a double slash.
+    Ok(format!("{}://{authority}", parsed.scheme()))
+}
+
 fn optional(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
@@ -131,6 +187,60 @@ mod tests {
         assert!(!const_time_eq(b"abc", b"abd"));
         assert!(!const_time_eq(b"abc", b"ab"));
         assert!(const_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn accepts_hostname_and_ip_forms() {
+        assert_eq!(
+            validate_base_url("http://vacuum.local").unwrap(),
+            "http://vacuum.local"
+        );
+        assert_eq!(
+            validate_base_url("192.168.0.46").unwrap(),
+            "http://192.168.0.46",
+            "a bare host should default to http"
+        );
+        assert_eq!(
+            validate_base_url("192.168.0.46:80").unwrap(),
+            "http://192.168.0.46",
+            "the default port is canonicalised away, which is equivalent"
+        );
+        assert_eq!(
+            validate_base_url("http://192.168.0.46:8080").unwrap(),
+            "http://192.168.0.46:8080",
+            "a non-default port must be preserved"
+        );
+        assert_eq!(
+            validate_base_url("  http://vacuum.local  ").unwrap(),
+            "http://vacuum.local",
+            "surrounding whitespace should be tolerated"
+        );
+    }
+
+    #[test]
+    fn normalises_away_path_and_trailing_slash() {
+        // Callers concatenate "/api/v2/robot/..." so the base must not keep a
+        // path or a trailing slash, or the joined URL gets a double slash.
+        assert_eq!(
+            validate_base_url("https://vacuum.local/").unwrap(),
+            "https://vacuum.local"
+        );
+        assert_eq!(
+            validate_base_url("https://vacuum.local:8080/some/path/").unwrap(),
+            "https://vacuum.local:8080"
+        );
+    }
+
+    #[test]
+    fn rejects_unusable_urls() {
+        assert!(validate_base_url("").is_err());
+        assert!(validate_base_url("   ").is_err());
+        assert!(validate_base_url("ftp://vacuum").is_err());
+        assert!(validate_base_url("file:///etc/passwd").is_err());
+        // Regression: naive slash trimming turned "http://" into "http:/",
+        // which parses as a host literally named "http".
+        assert!(validate_base_url("http://").is_err());
+        assert!(validate_base_url("http:///").is_err());
     }
 
     #[test]

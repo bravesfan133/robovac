@@ -1,3 +1,4 @@
+mod cache;
 mod config;
 mod map;
 mod valetudo;
@@ -5,6 +6,7 @@ mod web;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Query, State};
@@ -22,6 +24,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+use crate::cache::{broadcast_payload, RobotCache};
 use crate::config::Config;
 use crate::valetudo::Valetudo;
 use askama::Template as _;
@@ -29,6 +32,9 @@ use askama::Template as _;
 #[derive(Clone)]
 struct AppState {
     valetudo: Valetudo,
+    /// Single source of truth for everything the UI renders. Only the poller
+    /// writes to it; handlers only read.
+    cache: Arc<RobotCache>,
     /// Broadcasts state updates to connected browsers.
     updates: broadcast::Sender<serde_json::Value>,
 }
@@ -48,7 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = Config::from_env().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let valetudo = Valetudo::new(&cfg)?;
-    let (updates, _) = broadcast::channel(32);
+    let cache = Arc::new(RobotCache::new());
+    let (updates, _) = broadcast::channel(64);
 
     tracing::info!(valetudo = %cfg.valetudo_url, "starting robovac");
 
@@ -57,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let state = AppState {
             valetudo: valetudo.clone(),
+            cache: cache.clone(),
             updates: updates.clone(),
         };
         tokio::spawn(poll_loop(state, cfg.poll_interval_ms));
@@ -90,7 +98,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
-        .with_state(AppState { valetudo, updates });
+        .with_state(AppState {
+            valetudo,
+            cache,
+            updates,
+        });
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "listening");
@@ -109,43 +121,32 @@ struct IndexQuery {
 
 async fn index(State(state): State<AppState>, Query(q): Query<IndexQuery>) -> Response {
     let selected = web::parse_selected(q.segments.as_ref());
+    let snap = state.cache.snapshot();
 
-    match web::gather(&state.valetudo, selected).await {
-        Ok((dashboard,)) => match dashboard.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(err) => template_error(err),
-        },
-        Err(err) => {
-            tracing::warn!(%err, "valetudo unreachable while rendering dashboard");
-            let mut fallback = web::Dashboard {
-                title: "Robovac",
-                info: None,
-                summary: Default::default(),
-                consumables: vec![],
-                segments: vec![],
-                fan_presets: vec![],
-                camera: None,
-                connected: false,
-                error: Some(err),
-            };
-            fallback.title = "Robovac \u{2014} offline";
-            match fallback.render() {
-                Ok(html) => Html(html).into_response(),
-                Err(err) => template_error(err),
-            }
-        }
+    if !snap.warm && snap.last_error.is_none() {
+        // Nothing has polled yet. Say so rather than claiming the robot is
+        // offline, which is a different and more alarming statement.
+        return Html(web::Dashboard::warming().render().unwrap_or_default()).into_response();
     }
+
+    let html = web::Dashboard::from_snapshot(&snap, selected).render();
+    Html(rendering(html)).into_response()
 }
 
-/// A template failure is our bug, not the robot's, so surface it as a 500 with
-/// the detail in the body rather than a blank page.
-fn template_error(err: askama::Error) -> Response {
-    tracing::error!(%err, "template render failed");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("template error: {err}"),
-    )
-        .into_response()
+/// Render a template result, turning a failure into a visible 500 instead of a
+/// blank page.
+fn rendering(html: Result<String, askama::Error>) -> String {
+    match html {
+        Ok(html) => html,
+        Err(err) => {
+            tracing::error!(%err, "template render failed");
+            format!(
+                "<!doctype html><meta charset=utf-8><title>Robovac</title>\
+<body style=\"font:16px sans-serif;background:#14161a;color:#e6e8ec;padding:2rem\">\
+<h1>Template error</h1><pre style=\"white-space:pre-wrap\">{err}</pre></body>"
+            )
+        }
+    }
 }
 
 /// Liveness. Answers 200 as long as this process is serving, *regardless* of
@@ -164,29 +165,68 @@ async fn healthz() -> Response {
     .into_response()
 }
 
-/// Readiness. 503 while the vacuum is unreachable, for anything that wants to
-/// gate on the robot actually being there.
 async fn readyz(State(state): State<AppState>) -> Response {
-    match state.valetudo.info().await {
-        Ok(info) => Json(serde_json::json!({
+    let snap = state.cache.snapshot();
+
+    if snap.warm {
+        let robot = snap
+            .info
+            .as_ref()
+            .map(|i| {
+                serde_json::json!({
+                    "model": i.model_name,
+                    "implementation": i.implementation,
+                    "manufacturer": i.manufacturer,
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
+        return Json(serde_json::json!({
             "ok": true,
-            "robot": info.model_name,
-            "implementation": info.implementation,
+            "robot": robot,
+            "seconds_since_contact": snap.last_ok.map(|i| i.elapsed().as_secs()),
         }))
-        .into_response(),
-        Err(err) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"ok": false, "error": err.to_string()})),
-        )
-            .into_response(),
+        .into_response();
     }
+
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "ok": false,
+            "error": snap.last_error.unwrap_or_else(|| "no successful poll yet".into()),
+            "ever_connected": snap.ever_ok,
+        })),
+    )
+        .into_response()
 }
 
+/// State for the frontend, served from cache. This route must never trigger a
+/// robot poll, or every browser refresh becomes a ~1s miio round trip.
 async fn api_state(State(state): State<AppState>) -> Response {
-    match state.valetudo.state().await {
-        Ok(s) => Json(s).into_response(),
-        Err(err) => error_response(err),
+    let snap = state.cache.snapshot();
+
+    if !snap.warm {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "summary": null,
+                "warming_up": true,
+                "error": snap.last_error,
+            })),
+        )
+            .into_response();
     }
+
+    Json(serde_json::json!({
+        "summary": snap.summary,
+        "map_version": snap.map_version,
+        "segments": snap.segments,
+        "consumables": snap.consumables,
+        "fan_presets": snap.fan_presets,
+        "camera": snap.camera,
+        "seconds_since_contact": snap.last_ok.map(|i| i.elapsed().as_secs()),
+        "last_error": snap.last_error,
+    }))
+    .into_response()
 }
 
 /// Raw capability list. The frontend uses it to hide controls the robot does
@@ -200,18 +240,18 @@ async fn api_capabilities(State(state): State<AppState>) -> Response {
 }
 
 async fn map_svg(State(state): State<AppState>) -> Response {
-    let svg = match state.valetudo.state().await {
-        Ok(s) => match s.map {
-            Some(raw) => match serde_json::from_value::<map::MapData>(raw) {
-                Ok(m) => map::render_svg(&m),
-                Err(err) => {
-                    tracing::warn!(%err, "could not parse map payload");
-                    String::from("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
-                }
-            },
-            None => String::from("<svg xmlns=\"http://www.w3.org/2000/svg\"/>"),
-        },
-        Err(err) => return error_response(err),
+    let snap = state.cache.snapshot();
+
+    let Some(svg) = snap.map_svg else {
+        // No map yet: the robot has not completed its first mapping run.
+        return (
+            [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\" \
+             class=\"vacuum-map\"><rect width=\"100\" height=\"100\" fill=\"#101216\"/>\
+             <text x=\"50\" y=\"52\" fill=\"#7a808c\" font-size=\"7\" text-anchor=\"middle\">\
+             map unavailable</text></svg>",
+        )
+            .into_response();
     };
 
     (
@@ -270,10 +310,7 @@ async fn clean_segments(
 }
 
 async fn camera_properties(State(state): State<AppState>) -> Response {
-    match state.valetudo.duststreaming_properties().await {
-        Ok(props) => Json(props).into_response(),
-        Err(err) => error_response(err),
-    }
+    Json(state.cache.snapshot().camera).into_response()
 }
 
 /// Proxy the robot's MPEG-TS stream so the browser only needs to reach this
@@ -382,52 +419,89 @@ fn error_response(err: valetudo::ApiError) -> Response {
     (status, Json(serde_json::json!({"error": err.to_string()}))).into_response()
 }
 
+/// Refresh the slowly-changing capabilities every N state polls.
+const META_EVERY_N_TICKS: u32 = 15;
+
 async fn poll_loop(state: AppState, interval_ms: u64) {
     let interval = Duration::from_millis(interval_ms.max(250));
     let mut consecutive_failures: u32 = 0;
+    // Consumables, segments and presets change rarely; polling them on every
+    // state tick would triple the robot traffic for no benefit. The first tick
+    // does fetch them, otherwise a freshly started dashboard would sit empty
+    // for a full interval, which reads as "no rooms found".
+    let mut ticks: u32 = 0;
 
     loop {
         match state.valetudo.state().await {
-            Ok(s) => {
-                // Log the recovery once, not on every subsequent success.
+            Ok(robot_state) => {
                 if consecutive_failures > 0 {
                     tracing::info!(failures = consecutive_failures, "reconnected to the vacuum");
                     consecutive_failures = 0;
                 }
-                let summary = valetudo::Summary::from_state(&s);
-                let payload = serde_json::json!({
-                    "summary": summary,
-                    "has_map": s.map.is_some(),
-                });
-                // No receivers is not an error; the dashboard polls on load.
-                let _ = state.updates.send(payload);
+
+                // Hands the raw state to the cache, which renders the map only
+                // when the pixels actually changed.
+                state
+                    .cache
+                    .update_state(&robot_state, crate::map::render_svg);
+                state.cache.record_success();
+
+                ticks = ticks.wrapping_add(1);
+                if ticks % META_EVERY_N_TICKS == 1 {
+                    refresh_meta(&state).await;
+                }
             }
             Err(err) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
-                // First failure, then every 30th. Debug level until it has been
-                // failing for a while, at which point it is worth a warning.
                 if consecutive_failures == 1 {
                     tracing::debug!(error = %err, "poll failed");
                 } else if consecutive_failures == 30 {
-                    // Sustained failure is a real condition, not chatter.
-                    tracing::warn!(
-                        error = %err,
-                        "still cannot reach the vacuum after 30 attempts"
-                    );
+                    tracing::warn!(error = %err, "still cannot reach the vacuum after 30 attempts");
                 } else if consecutive_failures % 300 == 0 {
-                    tracing::warn!(
-                        failures = consecutive_failures,
-                        error = %err,
-                        "still cannot reach the vacuum"
-                    );
+                    tracing::warn!(failures = consecutive_failures, error = %err, "still cannot reach the vacuum");
                 }
-                let _ = state
-                    .updates
-                    .send(serde_json::json!({"summary": null, "error": err.to_string()}));
+                state.cache.record_failure(err.to_string());
             }
         }
+
+        let _ = state.updates.send(broadcast_payload(&state.cache));
         tokio::time::sleep(interval).await;
     }
+}
+
+/// Refresh the slowly-changing parts. Failures here are tolerated: the robot
+/// being able to answer these at all is not guaranteed on every model, and a
+/// missing section should not blank the dashboard.
+async fn refresh_meta(state: &AppState) {
+    let (consumables, segments, presets, camera) = futures_util::join!(
+        state.valetudo.consumables(),
+        state.valetudo.segments(),
+        state.valetudo.fan_speed_presets(),
+        state.valetudo.duststreaming_properties(),
+    );
+
+    // `as_ref().err()` avoids consuming the Result before it is used below.
+    for (name, result) in [
+        ("consumables", consumables.as_ref().err()),
+        ("segments", segments.as_ref().err()),
+        ("fan presets", presets.as_ref().err()),
+        ("camera", camera.as_ref().err()),
+    ] {
+        if let Some(err) = result {
+            tracing::debug!(capability = name, error = %err, "capability unavailable");
+        }
+    }
+
+    if let Ok(info) = state.valetudo.info().await {
+        state.cache.update_info(info);
+    }
+
+    state.cache.update_meta(
+        consumables.unwrap_or_default(),
+        segments.unwrap_or_default(),
+        presets.unwrap_or_default(),
+        camera.ok().flatten(),
+    );
 }
 
 /// Optional basic auth in front of this service, in addition to whatever

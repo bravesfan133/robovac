@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use askama::Template;
 use serde::Serialize;
 
+use crate::cache::Snapshot;
 use crate::valetudo::{Consumable, MapSegment, Summary};
 
 #[derive(Template)]
@@ -15,18 +16,14 @@ pub struct Dashboard<'a> {
     pub segments: Vec<SegmentView>,
     pub fan_presets: Vec<String>,
     pub camera: Option<CameraView>,
+    /// True when at least one poll has ever succeeded.
     pub connected: bool,
+    /// Distinguishes "still starting up" from "the robot is gone", which the
+    /// template renders differently.
+    pub ever_connected: bool,
     pub error: Option<String>,
-}
-
-impl Dashboard<'_> {
-    /// Battery as a ready-to-print string; the template has no arithmetic.
-    pub fn battery_display(&self) -> String {
-        match self.summary.battery {
-            Some(level) => format!("{level:.0}%"),
-            None => "\u{2014}".to_string(),
-        }
-    }
+    pub contact_note: Option<String>,
+    pub selected_segments: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -39,16 +36,14 @@ pub struct Info {
 #[derive(Clone, Debug, Serialize)]
 pub struct ConsumableView {
     pub label: String,
-    pub sub_type: String,
     pub value: f64,
     pub unit: String,
-    /// Percentage remaining, when the consumable reports in percent.
     pub percent: Option<f64>,
 }
 
 impl ConsumableView {
     pub fn from(c: &Consumable) -> Self {
-        let label = match c.consumable_type.as_str() {
+        let base = match c.consumable_type.as_str() {
             "filter" => "Filter",
             "brush" => "Brush",
             "mop" => "Mop",
@@ -58,9 +53,9 @@ impl ConsumableView {
             other => other,
         };
         let label = if c.sub_type.is_empty() || c.sub_type == "none" {
-            label.to_string()
+            base.to_string()
         } else {
-            format!("{label} ({})", prettify(&c.sub_type))
+            format!("{base} ({})", prettify(&c.sub_type))
         };
 
         let percent =
@@ -68,7 +63,6 @@ impl ConsumableView {
 
         Self {
             label,
-            sub_type: c.sub_type.clone(),
             value: c.remaining.value,
             unit: c.remaining.unit.clone(),
             percent,
@@ -94,81 +88,104 @@ fn prettify(value: &str) -> String {
     value.replace('_', " ")
 }
 
-/// Everything the dashboard needs, gathered concurrently so a slow capability
-/// does not serialise behind the others.
-pub async fn gather(
-    valetudo: &crate::valetudo::Valetudo,
-    selected: Vec<String>,
-) -> Result<(Dashboard<'_>,), String> {
-    let (info, state, consumables, segments, fan_presets, camera) = futures_util::join!(
-        valetudo.info(),
-        valetudo.state(),
-        valetudo.consumables(),
-        valetudo.segments(),
-        valetudo.fan_speed_presets(),
-        valetudo.duststreaming_properties(),
-    );
+impl<'a> Dashboard<'a> {
+    /// Battery as a ready-to-print string; the template has no arithmetic.
+    pub fn battery_display(&self) -> String {
+        match self.summary.battery {
+            Some(level) => format!("{level:.0}%"),
+            None => "\u{2014}".to_string(),
+        }
+    }
 
-    // State is the one thing the page cannot render without.
-    let state = state.map_err(|e| e.to_string())?;
+    /// The first poll has not succeeded yet, and never has: the poller may not
+    /// even have run. Distinct from "was working, now isn't".
+    pub fn warming() -> Self {
+        Self {
+            title: "Robovac",
+            info: None,
+            summary: Summary::default(),
+            consumables: Vec::new(),
+            segments: Vec::new(),
+            fan_presets: Vec::new(),
+            camera: None,
+            connected: false,
+            ever_connected: false,
+            error: None,
+            contact_note: None,
+            selected_segments: Vec::new(),
+        }
+    }
 
-    // Everything else degrades to an empty section rather than a broken page.
-    let info = info.ok().map(|i| Info {
-        manufacturer: i.manufacturer,
-        model_name: i.model_name,
-        implementation: i.implementation,
-    });
+    pub fn from_snapshot(snap: &Snapshot, selected: Vec<String>) -> Self {
+        let info = snap.info.as_ref().map(|i| Info {
+            manufacturer: i.manufacturer.clone(),
+            model_name: i.model_name.clone(),
+            implementation: i.implementation.clone(),
+        });
 
-    let warnings: Vec<String> = [
-        consumables.as_ref().err().map(|e| e.to_string()),
-        segments.as_ref().err().map(|e| e.to_string()),
-        fan_presets.as_ref().err().map(|e| e.to_string()),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+        let consumables = snap.consumables.iter().map(ConsumableView::from).collect();
 
-    let consumables = consumables
-        .unwrap_or_default()
-        .iter()
-        .map(ConsumableView::from)
-        .collect();
+        let segments: Vec<SegmentView> = snap
+            .segments
+            .iter()
+            .map(|s: &MapSegment| {
+                let name = s
+                    .name
+                    .clone()
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| s.id.clone());
+                SegmentView {
+                    selected: selected.contains(&s.id),
+                    id: s.id.clone(),
+                    name,
+                }
+            })
+            .collect();
 
-    let segment_views: Vec<SegmentView> = segments
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s: MapSegment| {
-            let name = s
-                .name
-                .filter(|n| !n.trim().is_empty())
-                .unwrap_or_else(|| s.id.clone());
-            SegmentView {
-                selected: selected.contains(&s.id),
-                id: s.id,
-                name,
+        let camera = snap.camera.as_ref().map(|p| CameraView {
+            width: p.width,
+            height: p.height,
+            available: p.duststreamer_installed,
+        });
+
+        // "Connected 4s ago" is far more useful than a bare timestamp, and it is
+        // the difference between a robot that is idle and one that fell off.
+        let contact_note = snap.last_ok.map(|at| {
+            let secs = at.elapsed().as_secs();
+            if secs < 5 {
+                "just now".to_string()
+            } else if secs < 90 {
+                format!("{secs}s ago")
+            } else if secs < 5400 {
+                format!("{}m ago", secs / 60)
+            } else {
+                format!("{}h ago", secs / 3600)
             }
-        })
-        .collect();
+        });
 
-    let camera = camera.ok().flatten().map(|p| CameraView {
-        width: p.width,
-        height: p.height,
-        available: p.duststreamer_installed,
-    });
+        let title = if snap.warm {
+            "Robovac"
+        } else if snap.ever_ok {
+            "Robovac \u{2014} unreachable"
+        } else {
+            "Robovac \u{2014} connecting"
+        };
 
-    let dashboard = Dashboard {
-        title: "Robovac",
-        info,
-        summary: Summary::from_state(&state),
-        consumables,
-        segments: segment_views,
-        fan_presets: fan_presets.unwrap_or_default(),
-        camera,
-        connected: true,
-        error: warnings.first().cloned(),
-    };
-
-    Ok((dashboard,))
+        Self {
+            title,
+            info,
+            summary: snap.summary.clone(),
+            consumables,
+            segments,
+            fan_presets: snap.fan_presets.clone(),
+            camera,
+            connected: snap.warm,
+            ever_connected: snap.ever_ok,
+            error: snap.last_error.clone(),
+            contact_note,
+            selected_segments: selected,
+        }
+    }
 }
 
 /// Parse the comma-separated `segments` query parameter.
@@ -180,7 +197,7 @@ pub fn parse_selected(raw: Option<&String>) -> Vec<String> {
     for part in raw.split(',') {
         let id = part.trim();
         // Segment ids are opaque; keep them short and printable so they cannot
-        // be used to bloat the page or smuggle markup.
+        // bloat the page or smuggle markup.
         if id.is_empty() || id.len() > 64 {
             continue;
         }
@@ -237,8 +254,44 @@ mod tests {
                 unit: "percent".into(),
             },
         };
-        let view = ConsumableView::from(&c);
-        assert_eq!(view.label, "Filter");
-        assert_eq!(view.percent, Some(42.0));
+        assert_eq!(ConsumableView::from(&c).percent, Some(42.0));
+    }
+
+    #[test]
+    fn warming_is_distinct_from_unreachable() {
+        let warming = Dashboard::warming();
+        assert!(!warming.connected);
+        assert!(!warming.ever_connected);
+
+        // Never connected: "connecting", not "unreachable".
+        let snap = Snapshot::default();
+        assert!(Dashboard::from_snapshot(&snap, vec![])
+            .title
+            .contains("connecting"));
+    }
+
+    #[test]
+    fn snapshot_drives_segments_and_selection() {
+        let snap = Snapshot {
+            segments: vec![
+                MapSegment {
+                    id: "1".into(),
+                    name: Some("Kitchen".into()),
+                },
+                MapSegment {
+                    id: "2".into(),
+                    name: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let dash = Dashboard::from_snapshot(&snap, vec!["2".to_string()]);
+        assert_eq!(dash.segments.len(), 2);
+        assert!(!dash.segments[0].selected);
+        assert!(
+            dash.segments[1].selected,
+            "unnamed segment should fall back to its id"
+        );
+        assert_eq!(dash.segments[1].name, "2");
     }
 }

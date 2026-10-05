@@ -109,7 +109,7 @@ impl Summary {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Consumable {
     #[serde(rename = "type")]
     pub consumable_type: String,
@@ -118,13 +118,13 @@ pub struct Consumable {
     pub remaining: Remaining,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Remaining {
     pub value: f64,
     pub unit: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MapSegment {
     pub id: String,
     #[serde(default)]

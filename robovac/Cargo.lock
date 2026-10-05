@@ -979,14 +979,15 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "futures-util",
- "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
