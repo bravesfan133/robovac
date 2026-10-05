@@ -89,6 +89,31 @@ pub struct Snapshot {
     pub warm: bool,
 }
 
+/// Compare-and-swap for the stored map. Lives on `Inner` so both entry points
+/// share exactly one definition of "did this change".
+impl Inner {
+    fn absorb(&mut self, map: MapData) {
+        // Conservative proxy: the robot rewrites the map wholesale as it
+        // explores, so these totals move whenever anything meaningful did.
+        let changed = match self.map.as_ref() {
+            Some(previous) => {
+                previous.size_fingerprint() != map.size_fingerprint()
+                    || previous.pixel_total() != map.pixel_total()
+                    || previous.entity_count() != map.entity_count()
+            }
+            None => true,
+        };
+
+        if !changed {
+            return;
+        }
+
+        self.map = Some(map);
+        self.rendered = None;
+        self.map_version = self.map_version.wrapping_add(1);
+    }
+}
+
 impl RobotCache {
     pub fn new() -> Self {
         Self::default()
@@ -159,22 +184,14 @@ impl RobotCache {
             return;
         };
 
-        let changed = match inner.map.as_ref() {
-            // Conservative proxy: the robot rewrites the map wholesale as it
-            // explores, so totals move whenever anything meaningful did.
-            Some(previous) => {
-                previous.size_fingerprint() != map.size_fingerprint()
-                    || previous.pixel_total() != map.pixel_total()
-                    || previous.entity_count() != map.entity_count()
-            }
-            None => true,
-        };
+        inner.absorb(map);
+    }
 
-        if changed {
-            inner.map = Some(map);
-            inner.rendered = None;
-            inner.map_version = inner.map_version.wrapping_add(1);
-        }
+    /// Replace the map directly, as when the upstream event stream says it
+    /// moved. Same change detection as `update_state`: an identical map must not
+    /// bump the version, or every browser re-fetches a document it already has.
+    pub fn set_map(&self, map: MapData) {
+        self.write().absorb(map);
     }
 
     /// Render the map for a particular selection, reusing the memoised result

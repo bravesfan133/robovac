@@ -1,6 +1,8 @@
 mod cache;
 mod config;
 mod map;
+mod sse;
+mod upstream;
 mod valetudo;
 mod web;
 
@@ -67,7 +69,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cache: cache.clone(),
             updates: updates.clone(),
         };
-        tokio::spawn(poll_loop(state, cfg.poll_interval_ms));
+        tokio::spawn(poll_loop(state.clone(), cfg.poll_interval_ms));
+
+        // One upstream subscription for the whole process, fanned out to
+        // browsers. Valetudo allows only a handful of these.
+        tokio::spawn(upstream::run(
+            state.valetudo.clone(),
+            state.cache.clone(),
+            state.updates.clone(),
+        ));
     }
 
     // Resolve the bind address before building the router so a malformed

@@ -104,6 +104,71 @@ const state = () => ({
   map,
 });
 
+// --- SSE, for the upstream event consumer -----------------------------------
+//
+// Valetudo caps concurrent event-stream clients. The fake tracks how many are
+// open and refuses past the cap, so a test can assert that robovac holds
+// exactly one subscription no matter how many browsers are attached.
+const MAX_SSE_CLIENTS = Number(process.env.FAKE_MAX_SSE ?? 5);
+const sseClients = new Set();
+let peakSseClients = 0;
+
+function sseHeaders() {
+  return {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+  };
+}
+
+function openSse(req, res) {
+  if (sseClients.size >= MAX_SSE_CLIENTS) {
+    // What Valetudo does when the cap is hit.
+    res.writeHead(503, { "content-type": "text/plain" });
+    res.end("too many clients");
+    console.log(`  SSE refused: ${sseClients.size} already open (cap ${MAX_SSE_CLIENTS})`);
+    return;
+  }
+
+  sseClients.add(res);
+  peakSseClients = Math.max(peakSseClients, sseClients.size);
+  res.writeHead(200, sseHeaders());
+  // writeHead alone does not put bytes on the wire, and the client will not see
+  // the headers at all until something is flushed. Send an opening comment so
+  // the connection is observably alive immediately.
+  res.write(": connected\n\n");
+
+  const keepAlive = setInterval(() => res.write(": keep-alive\n\n"), 5000);
+  console.log(`  SSE opened (${sseClients.size} concurrent)`);
+
+  // `res` is the reliable disconnect signal. `req` emits "close" as soon as a
+  // bodyless GET has been fully received, which happens immediately and would
+  // un-track a live connection.
+  const close = () => {
+    clearInterval(keepAlive);
+    if (sseClients.delete(res)) {
+      console.log(`  SSE closed (${sseClients.size} concurrent)`);
+    }
+  };
+  res.on("close", close);
+  res.on("error", close);
+}
+
+function broadcastMapEvent() {
+  for (const res of sseClients) {
+    res.write(`event: MapUpdated\ndata: ${JSON.stringify(map)}\n\n`);
+  }
+}
+
+// Set when the geometry changes, so map subscribers get told.
+let mapSignature = "";
+
+function mapChanged() {
+  const signature = JSON.stringify(map);
+  if (signature === mapSignature) return false;
+  mapSignature = signature;
+  return true;
+}
+
 const json = (res, body, code = 200) => {
   const payload = JSON.stringify(body);
   res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(payload) });
@@ -120,6 +185,31 @@ createServer((req, res) => {
 
   if (path === "/api/v2/robot") {
     return json(res, { manufacturer: "Dreame", modelName: "L40 Ultra", implementation: "DreameL40UltraValetudoRobot" });
+  }
+  if (path === "/api/v2/robot/state/map/sse") {
+    openSse(req, res);
+    return;
+  }
+  // Test hook: change the map and notify subscribers, the way a robot would.
+  if (path === "/test/mutate") {
+    const w = Number(url.searchParams.get("w") ?? 8);
+    layers[0].pixels = [];
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < w; x++) {
+        if (x === w - 1) continue;
+        layers[0].pixels.push(x, y);
+      }
+    }
+    if (mapChanged()) broadcastMapEvent();
+    json(res, { changed: true, w });
+    return;
+  }
+  if (path === "/test/sse-stats") {
+    json(res, { concurrent: sseClients.size, peak: peakSseClients, cap: MAX_SSE_CLIENTS });
+    return;
+  }
+  if (path === "/api/v2/robot/state/map") {
+    return json(res, map);
   }
   if (path === "/api/v2/robot/state") {
     return json(res, state());

@@ -14,6 +14,11 @@ const BASE: &str = "/api/v2/robot";
 #[derive(Clone)]
 pub struct Valetudo {
     http: reqwest::Client,
+    /// A second client with no request timeout, used only for the long-lived
+    /// event stream. Sharing the JSON client would sever a healthy stream every
+    /// few seconds, because its timeout is sized for single request/response
+    /// calls.
+    stream: reqwest::Client,
     base_url: String,
     auth: Option<(String, String)>,
 }
@@ -189,8 +194,18 @@ impl Valetudo {
             _ => None,
         };
 
+        let stream = reqwest::Client::builder()
+            // No overall timeout: an event stream is meant to stay open. A
+            // connect timeout still guards against an unreachable host, and the
+            // consumer detects a dead connection by the absence of keep-alives.
+            .connect_timeout(Duration::from_secs(cfg.request_timeout_secs))
+            .user_agent(concat!("robovac/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|e| format!("could not build streaming HTTP client: {e}"))?;
+
         Ok(Self {
             http,
+            stream,
             base_url: format!("{}{}", cfg.valetudo_url, BASE),
             auth,
         })
@@ -234,6 +249,31 @@ impl Valetudo {
     pub async fn info(&self) -> Result<RobotInfo, ApiError> {
         let resp = self.request("").send().await.map_err(transport)?;
         Self::send_json(resp).await
+    }
+
+    /// The cached map, which Valetudo serves without contacting the robot.
+    ///
+    /// This is the cheap counterpart to `state()`. Prefer it anywhere a map is
+    /// needed: it costs nothing on the miio link, so using `state()` here would
+    /// spend a full poll to read data Valetudo already has.
+    pub async fn map(&self) -> Result<crate::map::MapData, ApiError> {
+        let resp = self.request("/state/map").send().await.map_err(transport)?;
+        Self::send_json(resp).await
+    }
+
+    /// Upstream event stream for map changes.
+    ///
+    /// Valetudo caps this endpoint at five concurrent clients, so exactly one
+    /// consumer is opened for the whole process and events are fanned out to
+    /// browsers over our own stream.
+    pub async fn map_events(&self) -> Result<reqwest::Response, ApiError> {
+        let url = format!("{}/state/map/sse", self.base_url);
+        let req = self.stream.get(url).header("accept", "text/event-stream");
+        let req = match &self.auth {
+            Some((u, p)) => req.basic_auth(u, Some(p)),
+            None => req,
+        };
+        req.send().await.map_err(transport)
     }
 
     pub async fn state(&self) -> Result<RobotState, ApiError> {
