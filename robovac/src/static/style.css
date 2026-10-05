@@ -68,6 +68,15 @@ h2 { font-size: 0.95rem; margin: 0 0 0.75rem; text-transform: uppercase; letter-
 
 .map { width: 100%; height: auto; display: block; background: #101216; border-radius: 8px; }
 
+.map-frame {
+  background: #101216;
+  border-radius: 8px;
+  min-height: 8rem;
+}
+.map-frame[data-failed] { display: none; }
+/* The SVG is inlined so it can be clicked; keep it behaving like the <img> it replaces. */
+.map-frame > svg { width: 100%; height: auto; display: block; }
+
 .status-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-bottom: 1rem; }
 .stat { display: flex; flex-direction: column; gap: 0.15rem; }
 .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
@@ -114,7 +123,11 @@ select {
   font-size: 0.9rem;
   cursor: pointer;
 }
-.chip:has(input:checked) { border-color: var(--accent); background: rgba(47,125,209,0.18); }
+.chip:has(input:checked), .chip.on {
+  border-color: var(--accent);
+  background: rgba(47,125,209,0.18);
+}
+.status.stale { opacity: 0.55; }
 
 .banner {
   background: rgba(200,89,60,0.12);

@@ -239,10 +239,11 @@ async fn api_capabilities(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn map_svg(State(state): State<AppState>) -> Response {
-    let snap = state.cache.snapshot();
+async fn map_svg(State(state): State<AppState>, Query(q): Query<IndexQuery>) -> Response {
+    // Selection is per-request, so the render is not cached across users.
+    let selected = web::parse_selected(q.segments.as_ref());
 
-    let Some(svg) = snap.map_svg else {
+    let Some(svg) = state.cache.render_map(&selected) else {
         // No map yet: the robot has not completed its first mapping run.
         return (
             [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
@@ -255,7 +256,20 @@ async fn map_svg(State(state): State<AppState>) -> Response {
     };
 
     (
-        [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            // The map changes only when the geometry does, and the cache already
+            // knows when that is. Without this a browser revalidates a document
+            // it has just fetched.
+            (
+                header::CACHE_CONTROL,
+                if selected.is_empty() {
+                    "public, max-age=2"
+                } else {
+                    "no-store"
+                },
+            ),
+        ],
         svg,
     )
         .into_response()
@@ -439,11 +453,9 @@ async fn poll_loop(state: AppState, interval_ms: u64) {
                     consecutive_failures = 0;
                 }
 
-                // Hands the raw state to the cache, which renders the map only
-                // when the pixels actually changed.
-                state
-                    .cache
-                    .update_state(&robot_state, crate::map::render_svg);
+                // The cache keeps the map as geometry and re-renders per request,
+                // since the rendered form depends on the browser's selection.
+                state.cache.update_state(&robot_state);
                 state.cache.record_success();
 
                 ticks = ticks.wrapping_add(1);

@@ -4,7 +4,10 @@ use serde::Deserialize;
 /// Unknown fields are ignored; unknown entity types are kept but not drawn.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MapData {
-    #[serde(default)]
+    // The wire format is camelCase; without this rename serde silently defaults
+    // to 0.0 and every coordinate renders at 1 unit per pixel instead of the
+    // real centimetre scale.
+    #[serde(default, rename = "pixelSize")]
     pub pixel_size: f64,
     #[serde(default)]
     pub layers: Vec<MapLayer>,
@@ -93,13 +96,26 @@ impl MapData {
     }
 }
 
+/// Embedded in the SVG so the map is interactive once inlined, and legible as a
+/// plain image if it is not. Kept small: this is serialised on every map change.
+const SEGMENT_STYLE: &str = r#"<style>
+.segment{cursor:pointer}
+.segment:hover rect{stroke:#2f7dd1;stroke-width:.35;stroke-linejoin:round}
+.segment[data-selected="true"] rect{stroke:#2f7dd1;stroke-width:.45;stroke-linejoin:round}
+.segment[data-selected="true"]{filter:brightness(.94)}
+.segment-label{cursor:pointer}
+.segment-label:hover{fill:#2f7dd1}
+.segment-label[data-clean]:hover{text-decoration:underline}
+</style>
+"#;
+
 /// Render the map as a standalone SVG document.
 ///
 /// Rendering happens server-side so the browser needs no map library and no
 /// knowledge of Valetudo's pixel encoding. Floor and segment layers are drawn
 /// as merged runs of pixels; walls on top. Everything is escaped, since segment
 /// names come from the robot and are attacker-influenced in the general case.
-pub fn render_svg(map: &MapData) -> String {
+pub fn render_svg(map: &MapData, selected: &[String]) -> String {
     let pixel_size = if map.pixel_size > 0.0 {
         map.pixel_size
     } else {
@@ -145,8 +161,12 @@ pub fn render_svg(map: &MapData) -> String {
     let mut svg = String::with_capacity(64 * 1024);
     svg.push_str(&format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{view_x:.2} {view_y:.2} {view_w:.2} {view_h:.2}\" \
-         preserveAspectRatio=\"xMidYMid meet\" class=\"vacuum-map\">\n"
+         preserveAspectRatio=\"xMidYMid meet\" class=\"vacuum-map\" \
+         data-pixel-size=\"{pixel_size:.4}\" data-view-x=\"{view_x:.2}\" data-view-y=\"{view_y:.2}\">\n"
     ));
+    // Styles live inside the document because the SVG is inlined into the page
+    // rather than referenced, so page CSS cannot be relied upon.
+    svg.push_str(SEGMENT_STYLE);
     svg.push_str("<rect x=\"-99999\" y=\"-99999\" width=\"1\" height=\"1\" fill=\"none\"/>\n");
 
     // Floor first, then segments tinted over it, then walls on top.
@@ -160,11 +180,28 @@ pub fn render_svg(map: &MapData) -> String {
         .filter(|l| l.layer_type == "segment")
         .enumerate()
     {
-        let fill = segment_color(&layer.meta_data.segment_id, segment_index);
+        let pixels = layer.pixels();
+        let Some(id) = layer.meta_data.segment_id.clone() else {
+            // A segment layer without an id cannot be selected or named, so
+            // draw it flat rather than emitting an unaddressable group.
+            let fill = segment_color(&None, segment_index);
+            svg.push_str(&layer_rects(layer, pixel_size, &fill));
+            continue;
+        };
+
+        let fill = segment_color(&Some(id.clone()), segment_index);
+        let is_selected = selected.iter().any(|s| s == &id);
+
+        svg.push_str(&format!(
+            "<g class=\"segment\" data-segment-id=\"{}\" data-selected=\"{is_selected}\" fill=\"{fill}\">\n",
+            escape(&id)
+        ));
         svg.push_str(&layer_rects(layer, pixel_size, &fill));
         if let Some(name) = &layer.meta_data.name {
-            svg.push_str(&label(name, &layer.pixels(), pixel_size));
+            // The label doubles as a one-click "clean just this room" target.
+            svg.push_str(&label(name, &pixels, pixel_size, &id));
         }
+        svg.push_str("</g>\n");
     }
 
     for layer in map.layers.iter().filter(|l| l.layer_type == "wall") {
@@ -217,7 +254,7 @@ fn layer_rects(layer: &MapLayer, pixel_size: f64, fill: &str) -> String {
     out
 }
 
-fn label(name: &str, pixels: &[(i64, i64)], pixel_size: f64) -> String {
+fn label(name: &str, pixels: &[(i64, i64)], pixel_size: f64, segment_id: &str) -> String {
     if pixels.is_empty() {
         return String::new();
     }
@@ -226,9 +263,11 @@ fn label(name: &str, pixels: &[(i64, i64)], pixel_size: f64) -> String {
     let cy = pixels.iter().map(|p| p.1 as f64).sum::<f64>() / count;
 
     format!(
-        "<text x=\"{:.2}\" y=\"{:.2}\" fill=\"#1b1d22\" font-size=\"{:.2}\" \
-         text-anchor=\"middle\" dominant-baseline=\"middle\" paint-order=\"stroke\" \
-         stroke=\"#ffffff\" stroke-width=\"{:.2}\" stroke-linejoin=\"round\">{}</text>",
+        "<text class=\"segment-label\" data-clean=\"{}\" x=\"{:.2}\" y=\"{:.2}\" fill=\"#1b1d22\" \
+         font-size=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"middle\" \
+         paint-order=\"stroke\" stroke=\"#ffffff\" stroke-width=\"{:.2}\" \
+         stroke-linejoin=\"round\">{}</text>",
+        escape(segment_id),
         cx * pixel_size,
         cy * pixel_size,
         (pixel_size * 2.2).max(6.0),
@@ -389,7 +428,7 @@ mod tests {
 
     #[test]
     fn renders_expected_elements() {
-        let svg = render_svg(&fixture());
+        let svg = render_svg(&fixture(), &[]);
         assert!(svg.starts_with("<svg"));
         assert!(svg.trim_end().ends_with("</svg>"));
         // Walls, robot, charger, path and the no-go polygon all appear.
@@ -401,7 +440,7 @@ mod tests {
 
     #[test]
     fn segment_names_are_escaped() {
-        let svg = render_svg(&fixture());
+        let svg = render_svg(&fixture(), &[]);
         assert!(svg.contains("Kitchen &lt;&amp;&gt;"));
         assert!(!svg.contains("Kitchen <&>"));
     }
@@ -426,8 +465,79 @@ mod tests {
             layers: vec![],
             entities: vec![],
         };
-        let svg = render_svg(&empty);
+        let svg = render_svg(&empty, &[]);
         assert!(svg.contains("no map yet"));
+    }
+
+    #[test]
+    fn segments_render_as_addressable_groups() {
+        let svg = render_svg(&fixture(), &[]);
+        assert!(svg.contains("<g class=\"segment\" data-segment-id=\"17\""));
+        // The embedded <style> block legitimately contains the literal
+        // `data-selected="true"`, so assert on the group attribute pair.
+        assert!(svg.contains("data-segment-id=\"17\" data-selected=\"false\""));
+        assert!(
+            svg.contains("data-clean=\"17\""),
+            "label should be clickable"
+        );
+    }
+
+    #[test]
+    fn selection_is_rendered_per_request() {
+        let svg = render_svg(&fixture(), &["17".to_string()]);
+        assert!(svg.contains("data-segment-id=\"17\" data-selected=\"true\""));
+    }
+
+    #[test]
+    fn selection_does_not_leak_between_renders() {
+        // The cache memoises on the selection; a fresh call with none must not
+        // inherit the previous render's selected state.
+        let selected = render_svg(&fixture(), &["17".to_string()]);
+        let plain = render_svg(&fixture(), &[]);
+        assert!(selected.contains("data-selected=\"true\""));
+        assert!(plain.contains("data-segment-id=\"17\" data-selected=\"false\""));
+    }
+
+    #[test]
+    fn segment_ids_are_escaped() {
+        let map: MapData = serde_json::from_str(
+            r#"{
+              "pixelSize": 5,
+              "layers": [{"type":"segment","pixels":[0,0],
+                          "metaData":{"segmentId":"\"><img src=x onerror=alert(1)>","name":"x"}}],
+              "entities": []
+            }"#,
+        )
+        .expect("map should parse");
+
+        let svg = render_svg(&map, &[]);
+        // The words "onerror=alert" survive as inert text inside an attribute
+        // value, which is fine. What must not survive is anything that could
+        // break out of the attribute and start a tag.
+        assert!(!svg.contains("<img"), "no raw tag may be injected");
+        assert!(!svg.contains("\"><"), "no attribute may be closed early");
+        assert!(svg.contains("&quot;&gt;&lt;img"), "payload must be escaped");
+    }
+
+    #[test]
+    fn segment_without_an_id_is_drawn_but_not_addressable() {
+        let map: MapData = serde_json::from_str(
+            r#"{"pixelSize":5,"layers":[{"type":"segment","pixels":[0,0],"metaData":{}}],"entities":[]}"#,
+        )
+        .unwrap();
+        let svg = render_svg(&map, &[]);
+        assert!(!svg.contains("data-segment-id"), "no id, no group");
+        assert!(svg.contains("<rect"), "but still drawn");
+    }
+
+    #[test]
+    fn map_exposes_viewport_metadata_for_zone_drawing() {
+        // Phase 4 maps pixel coordinates back to map coordinates using these.
+        let map = fixture();
+        assert_eq!(map.pixel_size, 5.0);
+        let svg = render_svg(&map, &[]);
+        assert!(svg.contains("data-pixel-size=\"5.0000\""));
+        assert!(svg.contains("data-view-x="));
     }
 
     #[test]

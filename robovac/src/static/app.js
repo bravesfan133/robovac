@@ -1,8 +1,122 @@
-// Progressive enhancement only. Every control on the page works as a plain
-// form/link without JavaScript; this just removes the round trips.
+// Progressive enhancement. Every control on the page works as a plain form or
+// link without JavaScript; this only removes round trips and adds the map
+// interactions HomeKit-grade widgets cannot express.
+//
+// Two things need JS and cannot work without it:
+//   1. Clicking a room on the map. The SVG is *inlined* rather than referenced,
+//      because an <img>-loaded SVG is a separate document: page CSS does not
+//      reach into it and click handlers cannot attach.
+//   2. Live updates over SSE.
 
-const selectedSegments = () =>
-  [...document.querySelectorAll('input[name="segment"]:checked')].map((el) => el.value);
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+// --- selection state ---------------------------------------------------------
+// Held in the URL fragment so a selection survives a reload and can be
+// bookmarked or shared, and so the server can render the selected state on the
+// very first paint, before this script runs.
+const selected = new Set(readFragment());
+
+function readFragment() {
+  return new URLSearchParams(location.hash.slice(1))
+    .get('segments')
+    ?.split(',')
+    .map((s) => s.trim())
+    .filter(Boolean) ?? [];
+}
+
+function writeFragment() {
+  const params = new URLSearchParams();
+  if (selected.size) params.set('segments', [...selected].join(','));
+  const next = params.toString();
+  // replaceState rather than assignment: selecting rooms should not fill the
+  // back button with dozens of entries.
+  history.replaceState(null, '', next ? `#${params}` : location.pathname + location.search);
+}
+
+const selectedQuery = () => [...selected].join(',');
+
+// --- map ---------------------------------------------------------------------
+
+async function loadMap() {
+  const frame = $('#map-frame');
+  if (!frame) return;
+
+  const query = selectedQuery();
+  try {
+    const res = await fetch(`/map.svg${query ? `?segments=${encodeURIComponent(query)}` : ''}`, {
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const svg = await res.text();
+
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    const parsed = doc.documentElement;
+    if (parsed.nodeName === 'parsererror' || !parsed.querySelector('.vacuum-map')) {
+      throw new Error('unparsable SVG');
+    }
+
+    frame.replaceChildren(document.importNode(parsed, true));
+    wireMap(frame);
+  } catch (err) {
+    // Leave the <noscript> image in place rather than showing an empty box.
+    frame.dataset.failed = '1';
+    const note = $('[data-role="map-note"]');
+    if (note) note.textContent = `Map unavailable (${err.message}).`;
+  }
+}
+
+function wireMap(frame) {
+  for (const group of $$('.segment', frame)) {
+    group.addEventListener('click', (evt) => {
+      // The label is a child of the group and carries its own action.
+      if (evt.target.closest('[data-clean]')) return;
+      const id = group.dataset.segmentId;
+      if (id) toggle(id);
+    });
+  }
+
+  // Clicking a room name cleans just that room.
+  for (const label of $$('[data-clean]', frame)) {
+    label.addEventListener('click', (evt) => {
+      evt.stopPropagation();
+      cleanSegments([label.dataset.clean]);
+    });
+  }
+}
+
+function toggle(id) {
+  if (!id) return;
+  if (selected.has(id)) selected.delete(id);
+  else selected.add(id);
+  syncSelection();
+  writeFragment();
+  loadMap();
+}
+
+/** Reflect the selection in the checkbox list and in the map's own attributes. */
+function syncSelection() {
+  for (const box of $$('input[name="segment"]')) {
+    box.checked = selected.has(box.value);
+  }
+
+  for (const chip of $$('.chip')) {
+    chip.classList.toggle('on', selected.has($('input', chip)?.value));
+  }
+
+  const frame = $('#map-frame');
+  for (const group of $$('.segment', frame)) {
+    group.dataset.selected = String(selected.has(group.dataset.segmentId));
+  }
+
+  const count = $('[data-role="selected-count"]');
+  if (count) count.textContent = String(selected.size);
+
+  const clean = $('#clean-selected');
+  if (clean) clean.disabled = selected.size === 0;
+}
+
+// --- commands ----------------------------------------------------------------
 
 async function post(url, body) {
   const res = await fetch(url, {
@@ -17,88 +131,106 @@ async function post(url, body) {
   return res.json();
 }
 
-document.querySelectorAll('button[data-action]').forEach((btn) => {
-  btn.addEventListener('click', async () => {
-    btn.disabled = true;
-    try {
-      await post(`/api/control/${btn.dataset.action}`);
-    } catch (err) {
-      alert(`Failed: ${err.message}`);
-    } finally {
-      btn.disabled = false;
-    }
-  });
-});
+async function withButton(btn, fn) {
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    await fn();
+  } catch (err) {
+    alert(`Failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    syncSelection();
+  }
+}
 
-const fan = document.getElementById('fan-speed');
+const cleanSegments = (ids) =>
+  withButton($('#clean-selected'), () =>
+    post('/api/clean-segments', { segment_ids: ids, iterations: 1 }),
+  );
+
+for (const btn of $$('button[data-action]')) {
+  btn.addEventListener('click', () =>
+    withButton(btn, () => post(`/api/control/${btn.dataset.action}`)),
+  );
+}
+
+const fan = $('#fan-speed');
 if (fan) {
-  fan.addEventListener('change', async () => {
-    try {
-      await post('/api/fan-speed', { name: fan.value });
-    } catch (err) {
-      alert(`Failed: ${err.message}`);
-    }
+  fan.addEventListener('change', () => post('/api/fan-speed', { name: fan.value }));
+}
+
+const clear = $('#clear-selection');
+if (clear) {
+  clear.addEventListener('click', () => {
+    selected.clear();
+    syncSelection();
+    writeFragment();
+    loadMap();
   });
 }
 
-const clean = document.getElementById('clean-selected');
-if (clean) {
-  clean.addEventListener('click', async (evt) => {
-    const ids = selectedSegments();
-    if (ids.length === 0) {
-      evt.preventDefault();
-      alert('Select at least one room.');
-    }
-  });
-}
+// --- live updates ------------------------------------------------------------
 
-// Live status via SSE. The server pushes a summary; we only patch the text
-// nodes that changed so the map image is not re-fetched.
-function patch(selector, value) {
-  const el = document.querySelector(selector);
+function patch(field, value) {
+  const el = document.querySelector(`[data-field="${field}"]`);
   if (el && value != null && el.textContent.trim() !== String(value)) {
     el.textContent = value;
   }
 }
 
-const source = new EventSource('/events');
-source.addEventListener('state', (evt) => {
-  let payload;
-  try {
-    payload = JSON.parse(evt.data);
-  } catch {
-    return;
-  }
-  const s = payload.summary;
-  if (!s) return;
-  patch('.controls .stat:nth-child(1) .value', s.status);
-  patch('.controls .stat:nth-child(2) .value', s.battery != null ? `${s.battery}%` : '—');
-  patch('.controls .stat:nth-child(3) .value', s.dock_status);
-});
+let lastMapVersion = null;
 
-// Camera: jsmpeg is loaded lazily so the page stays cheap when unused.
-const cameraBtn = document.getElementById('camera-toggle');
+function connect() {
+  const source = new EventSource('/events');
+
+  source.addEventListener('state', (evt) => {
+    let payload;
+    try {
+      payload = JSON.parse(evt.data);
+    } catch {
+      return;
+    }
+
+    const s = payload.summary;
+    if (s) {
+      patch('status', s.status);
+      patch('battery', s.battery != null ? `${Math.round(s.battery)}%` : '—');
+      patch('dock', s.dock_status);
+    }
+
+    // Only re-fetch the map when the server says the geometry actually moved.
+    // The map document is large and unchanged most ticks.
+    if (typeof payload.map_version === 'number' && payload.map_version !== lastMapVersion) {
+      lastMapVersion = payload.map_version;
+      loadMap();
+    }
+  });
+
+  // EventSource reconnects on its own, but surfacing the state stops the UI
+  // looking live when it is not.
+  source.addEventListener('error', () => {
+    const link = $('.status');
+    if (link && link.classList.contains('ok')) link.classList.add('stale');
+  });
+}
+
+// --- camera ------------------------------------------------------------------
+
+const cameraBtn = $('#camera-toggle');
 if (cameraBtn) {
   cameraBtn.addEventListener('click', async () => {
-    const video = document.getElementById('camera');
+    const video = $('#camera');
     if (video.dataset.playing === '1') {
       video.srcObject = null;
-      video.dataset.playing = '0';
+      delete video.dataset.playing;
       cameraBtn.textContent = 'Start camera';
       return;
     }
     cameraBtn.disabled = true;
     try {
-      const { default: JSMpeg } = await import(
-        'https://cdn.jsdelivr.net/npm/jsmpeg@1.0.2/+esm'
-      );
-      video.dataset.player = '1';
-      new JSMpeg.Player(video, {
-        url: '/api/camera/stream',
-        type: 'mpegts',
-        live: true,
-        autoplay: true,
-      });
+      const { default: JSMpeg } = await import('https://cdn.jsdelivr.net/npm/jsmpeg@1.0.2/+esm');
+      new JSMpeg.Player(video, { url: '/api/camera/stream', type: 'mpegts', live: true, autoplay: true });
       video.dataset.playing = '1';
       cameraBtn.textContent = 'Stop camera';
     } catch (err) {
@@ -108,3 +240,10 @@ if (cameraBtn) {
     }
   });
 }
+
+// --- boot --------------------------------------------------------------------
+
+// Server-rendered state is already in the DOM, so the first paint needs no JS.
+syncSelection();
+loadMap();
+connect();

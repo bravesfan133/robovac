@@ -35,8 +35,11 @@ struct Inner {
     segments: Vec<MapSegment>,
     fan_presets: Vec<String>,
     camera: Option<DuststreamProperties>,
-    map_svg: Option<String>,
-    /// Bumped whenever the map changes, so the UI can skip redundant re-renders.
+    /// Memoised render, keyed by the selection it was rendered for. One entry
+    /// is enough: nearly every request shares the same selection, and holding
+    /// more would just cache memory nobody reads.
+    rendered: Option<(Vec<String>, String)>,
+    /// Bumped whenever the map changes, so clients can skip redundant work.
     map_version: u64,
     /// Raw map, kept for callers that need geometry rather than a rendered SVG.
     map: Option<MapData>,
@@ -57,7 +60,7 @@ impl Default for RobotCache {
                 segments: Vec::new(),
                 fan_presets: Vec::new(),
                 camera: None,
-                map_svg: None,
+                rendered: None,
                 map_version: 0,
                 map: None,
                 last_ok: None,
@@ -77,7 +80,6 @@ pub struct Snapshot {
     pub segments: Vec<MapSegment>,
     pub fan_presets: Vec<String>,
     pub camera: Option<DuststreamProperties>,
-    pub map_svg: Option<String>,
     pub map_version: u64,
     pub last_ok: Option<Instant>,
     pub last_error: Option<String>,
@@ -101,7 +103,6 @@ impl RobotCache {
             segments: inner.segments.clone(),
             fan_presets: inner.fan_presets.clone(),
             camera: inner.camera.clone(),
-            map_svg: inner.map_svg.clone(),
             map_version: inner.map_version,
             last_ok: inner.last_ok,
             last_error: inner.last_error.clone(),
@@ -140,10 +141,14 @@ impl RobotCache {
         inner.camera = camera;
     }
 
-    /// Fold a freshly polled state into the cache, re-rendering the map only
-    /// when it actually differs. Re-serialising a large SVG every two seconds
-    /// for an unchanged map is pure waste.
-    pub fn update_state(&self, state: &RobotState, render: impl Fn(&MapData) -> String) {
+    /// Fold a freshly polled state into the cache. The map is kept as geometry
+    /// rather than a rendered SVG, because the rendered form depends on which
+    /// rooms the *requesting browser* has selected.
+    ///
+    /// Replacing the map only when it actually differs matters: a full JSON
+    /// parse plus re-serialise every two seconds for an unchanged map is waste,
+    /// and parsing is the expensive half.
+    pub fn update_state(&self, state: &RobotState) {
         let mut inner = self.write();
         inner.summary = Summary::from_state(state);
 
@@ -155,10 +160,9 @@ impl RobotCache {
         };
 
         let changed = match inner.map.as_ref() {
+            // Conservative proxy: the robot rewrites the map wholesale as it
+            // explores, so totals move whenever anything meaningful did.
             Some(previous) => {
-                // Compare the cheap discriminant first: map_version only changes
-                // when the pixels differ, and a version stamp would not survive
-                // a restart, so compare sizes as a conservative proxy too.
                 previous.size_fingerprint() != map.size_fingerprint()
                     || previous.pixel_total() != map.pixel_total()
                     || previous.entity_count() != map.entity_count()
@@ -167,10 +171,27 @@ impl RobotCache {
         };
 
         if changed {
-            inner.map_svg = Some(render(&map));
             inner.map = Some(map);
+            inner.rendered = None;
             inner.map_version = inner.map_version.wrapping_add(1);
         }
+    }
+
+    /// Render the map for a particular selection, reusing the memoised result
+    /// when the request asks for the same thing.
+    pub fn render_map(&self, selected: &[String]) -> Option<String> {
+        let mut inner = self.write();
+        let map = inner.map.as_ref()?;
+
+        if let Some((cached_for, svg)) = &inner.rendered {
+            if cached_for.as_slice() == selected {
+                return Some(svg.clone());
+            }
+        }
+
+        let svg = crate::map::render_svg(map, selected);
+        inner.rendered = Some((selected.to_vec(), svg.clone()));
+        Some(svg)
     }
 
     /// Force a re-render on the next state update, e.g. after the map was reset.
@@ -178,7 +199,7 @@ impl RobotCache {
     pub fn invalidate_map(&self) {
         let mut inner = self.write();
         inner.map = None;
-        inner.map_svg = None;
+        inner.rendered = None;
     }
 
     /// Map geometry, for features that need coordinates rather than an already
@@ -187,6 +208,17 @@ impl RobotCache {
     #[allow(dead_code, reason = "used by zone drawing")]
     pub fn map(&self) -> Option<MapData> {
         self.read().map.clone()
+    }
+
+    /// Scale factor and viewport, for mapping pixel coordinates back to map
+    /// coordinates when the client draws a zone.
+    #[allow(dead_code, reason = "used by zone drawing")]
+    pub fn map_scale(&self) -> Option<(f64, f64)> {
+        let inner = self.read();
+        inner
+            .map
+            .as_ref()
+            .map(|m| (m.pixel_size, 1.0 / m.pixel_size.max(f64::EPSILON)))
     }
 
     /// Monotonic stamp for the rendered map, so clients can skip re-rendering
@@ -249,6 +281,26 @@ mod tests {
         .expect("state should parse")
     }
 
+    /// A map with two named segments, needed to test selection-aware rendering.
+    fn state_with_segments() -> RobotState {
+        serde_json::from_str(
+            r#"{
+              "attributes": [{"__class":"StatusStateAttribute","metaData":{},"value":"idle","flag":"none"}],
+              "map": {
+                "metaData": {"version": 2},
+                "pixelSize": 5,
+                "layers": [
+                  {"type":"floor","pixels":[0,0, 1,0, 0,1, 1,1],"metaData":{}},
+                  {"type":"segment","compressedPixels":[0,0,2],"metaData":{"segmentId":"1","name":"Kitchen"}},
+                  {"type":"segment","pixels":[0,1,1,1],"metaData":{"segmentId":"2","name":"Hall"}}
+                ],
+                "entities": []
+              }
+            }"#,
+        )
+        .expect("segment map should parse")
+    }
+
     #[test]
     fn cold_cache_reports_not_warm() {
         let cache = RobotCache::new();
@@ -283,80 +335,103 @@ mod tests {
     }
 
     #[test]
-    fn state_update_renders_map_once_and_reuses_it() {
+    fn map_is_stored_and_renderable() {
         let cache = RobotCache::new();
-        let renders = std::cell::Cell::new(0u32);
-
-        let state = state_with_map(vec![0, 0, 1, 0]);
-        cache.update_state(&state, counting_render(&renders));
-        assert_eq!(renders.get(), 1);
-        let version = cache.map_version();
-        assert_eq!(version, 1);
-        assert_eq!(cache.snapshot().map_svg.as_deref(), Some("<svg/>"));
-
-        // Identical map: summary refreshed, but no re-render.
-        cache.update_state(&state, counting_render(&renders));
-        assert_eq!(renders.get(), 1, "unchanged map must not re-render");
-        assert_eq!(cache.map_version(), version);
+        cache.update_state(&state_with_map(vec![0, 0, 1, 0]));
+        assert_eq!(cache.map_version(), 1);
+        assert!(cache.render_map(&[]).is_some(), "map should render");
     }
 
     #[test]
-    fn changed_map_triggers_rerender() {
+    fn unchanged_map_does_not_bump_the_version() {
         let cache = RobotCache::new();
-        let renders = std::cell::Cell::new(0u32);
+        let state = state_with_map(vec![0, 0, 1, 0]);
 
-        cache.update_state(&state_with_map(vec![0, 0]), counting_render(&renders));
-        cache.update_state(
-            &state_with_map(vec![0, 0, 1, 0, 2, 0]),
-            counting_render(&renders),
+        cache.update_state(&state);
+        assert_eq!(cache.map_version(), 1);
+
+        // Identical map: re-parsing happens but the stored geometry is kept, so
+        // the version and any memoised render stay valid.
+        cache.update_state(&state);
+        assert_eq!(
+            cache.map_version(),
+            1,
+            "unchanged map must not bump version"
         );
-        assert_eq!(renders.get(), 2);
+    }
+
+    #[test]
+    fn changed_map_bumps_the_version() {
+        let cache = RobotCache::new();
+        cache.update_state(&state_with_map(vec![0, 0]));
+        cache.update_state(&state_with_map(vec![0, 0, 1, 0, 2, 0]));
         assert_eq!(cache.map_version(), 2);
+    }
+
+    #[test]
+    fn render_is_memoised_per_selection() {
+        let cache = RobotCache::new();
+        cache.update_state(&state_with_segments());
+
+        let first = cache.render_map(&[]).unwrap();
+        assert_eq!(first, cache.render_map(&[]).unwrap(), "memoised");
+        // Check the group attribute, not the bare token: the embedded <style>
+        // block legitimately contains `data-selected="true"` as a selector.
+        assert!(first.contains("data-segment-id=\"1\" data-selected=\"false\""));
+
+        // A different selection must produce a different document, and must not
+        // hand back the memoised one.
+        let selected = cache.render_map(&["2".to_string()]).unwrap();
+        assert_ne!(first, selected, "selection must reach the render");
+        assert!(selected.contains("data-segment-id=\"2\" data-selected=\"true\""));
+        // ...and switching back must not return the stale selected render.
+        assert_eq!(first, cache.render_map(&[]).unwrap());
     }
 
     #[test]
     fn summary_tracks_the_latest_state() {
         let cache = RobotCache::new();
-        cache.update_state(&state_with_map(vec![0, 0]), |_| "<svg/>".into());
+        cache.update_state(&state_with_map(vec![0, 0]));
         let snap = cache.snapshot();
         assert_eq!(snap.summary.status.as_deref(), Some("cleaning"));
         assert_eq!(snap.summary.battery, Some(55.0));
     }
 
     #[test]
-    fn invalidate_forces_next_render() {
+    fn invalidate_forces_the_map_to_be_replaced() {
         let cache = RobotCache::new();
-        let renders = std::cell::Cell::new(0u32);
-        cache.update_state(&state_with_map(vec![0, 0]), counting_render(&renders));
+        cache.update_state(&state_with_map(vec![0, 0]));
+        assert!(cache.render_map(&[]).is_some());
+
         cache.invalidate_map();
-        cache.update_state(&state_with_map(vec![0, 0]), counting_render(&renders));
-        assert_eq!(renders.get(), 2);
+        assert!(cache.render_map(&[]).is_none(), "map should be gone");
     }
 
     #[test]
-    fn state_without_map_leaves_previous_map_alone() {
+    fn state_without_map_keeps_the_previous_one() {
         let cache = RobotCache::new();
-        cache.update_state(&state_with_map(vec![0, 0]), |_| "<svg/>".into());
+        cache.update_state(&state_with_map(vec![0, 0]));
+        let before = cache.render_map(&[]).unwrap();
 
         let no_map: RobotState = serde_json::from_str(
             r#"{"attributes":[{"__class":"StatusStateAttribute","metaData":{},"value":"idle","flag":"none"}]}"#,
         )
         .unwrap();
-        cache.update_state(&no_map, |_| panic!("must not render without a map"));
+        cache.update_state(&no_map);
 
         let snap = cache.snapshot();
         assert_eq!(snap.summary.status.as_deref(), Some("idle"));
         assert_eq!(
-            snap.map_svg.as_deref(),
-            Some("<svg/>"),
-            "map should persist"
+            cache.render_map(&[]).unwrap(),
+            before,
+            "a poll without a map must not blank the floor plan"
         );
     }
 
     #[test]
     fn broadcast_payload_is_serialisable() {
         let cache = RobotCache::new();
-        cache.update_state(&state_with_map(vec![0, 0]), |_| "<svg/>".into());
+        cache.update_state(&state_with_map(vec![0, 0]));
         cache.record_success();
         let payload = broadcast_payload(&cache);
         assert_eq!(payload["ok"], Value::Bool(true));

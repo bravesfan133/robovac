@@ -35,7 +35,11 @@
 
 <main>
   <section class="map-panel">
-    <img src="/map.svg" alt="Floor plan" class="map" id="map" data-map-version="0">
+    <div class="map-frame" id="map-frame" data-map-version="-1">
+      <noscript>
+        <img src="/map.svg?segments={{ selected_segments.join(",") }}" alt="Floor plan" class="map">
+      </noscript>
+    </div>
     <p class="muted small">
       Rendered server-side from Valetudo's pixel data.
       <span data-role="map-note"></span>
